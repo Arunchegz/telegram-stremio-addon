@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+
 import requests
 import os
 import json
@@ -10,12 +12,24 @@ from telegram.ext import Updater, MessageHandler, Filters
 app = FastAPI()
 
 # ---------------------------------------------------
-# CONFIG
+# CORS FIX FOR STREMIO WEB
+# ---------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------
+# ENV VARIABLES
 # ---------------------------------------------------
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 BASE_URL = os.getenv("BASE_URL")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 DB_FILE = "movies.json"
 
@@ -42,6 +56,10 @@ FILES = load_movies()
 
 def handle_movie(update, context):
 
+    # Only allow your channel
+    if update.effective_chat.id != CHANNEL_ID:
+        return
+
     message = update.message
 
     if not message:
@@ -63,13 +81,13 @@ def handle_movie(update, context):
     filename = getattr(media, "file_name", None)
 
     if not filename:
-        filename = f"Movie {len(FILES)+1}"
+        filename = f"Movie_{len(FILES)+1}"
 
     movie_id = filename.replace(" ", "_").lower()
 
     FILES[movie_id] = {
         "name": filename,
-        "poster": "https://via.placeholder.com/300x450.png?text=Movie",
+        "poster": "https://via.placeholder.com/300x450.png?text=Telegram+Movie",
         "description": filename,
         "file_id": file_id
     }
@@ -77,6 +95,10 @@ def handle_movie(update, context):
     save_movies(FILES)
 
     print(f"Added movie: {filename}")
+
+# ---------------------------------------------------
+# START TELEGRAM BOT
+# ---------------------------------------------------
 
 def start_bot():
 
@@ -93,11 +115,11 @@ def start_bot():
 
     updater.start_polling()
 
-# Start telegram bot in background
+# Start bot in background thread
 threading.Thread(target=start_bot).start()
 
 # ---------------------------------------------------
-# MANIFEST
+# STREMIO MANIFEST
 # ---------------------------------------------------
 
 manifest = {
@@ -123,7 +145,7 @@ manifest = {
 }
 
 # ---------------------------------------------------
-# MANIFEST ROUTE
+# MANIFEST
 # ---------------------------------------------------
 
 @app.get("/manifest.json")
@@ -188,14 +210,14 @@ async def stream(id: str):
         "streams": [
             {
                 "name": "☁️ Telegram",
-                "title": "Telegram Stream",
+                "title": FILES[id]["name"],
                 "url": f"{BASE_URL}/watch/{id}"
             }
         ]
     })
 
 # ---------------------------------------------------
-# WATCH ENDPOINT
+# WATCH
 # ---------------------------------------------------
 
 @app.get("/watch/{id}")
@@ -208,7 +230,6 @@ async def watch(id: str):
 
     file_id = movie["file_id"]
 
-    # Telegram getFile API
     r = requests.get(
         f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
         params={"file_id": file_id}
@@ -216,10 +237,20 @@ async def watch(id: str):
 
     file_path = r["result"]["file_path"]
 
-    # Telegram CDN URL
     tg_url = (
         f"https://api.telegram.org/file/bot"
         f"{BOT_TOKEN}/{file_path}"
     )
 
     return RedirectResponse(tg_url)
+
+# ---------------------------------------------------
+# HOME
+# ---------------------------------------------------
+
+@app.get("/")
+async def home():
+    return {
+        "status": "running",
+        "addon": "Telegram Stream Addon"
+    }
