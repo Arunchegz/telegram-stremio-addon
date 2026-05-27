@@ -1,34 +1,54 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import (
+    JSONResponse,
+    StreamingResponse
+)
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 
-import requests
+from pyrogram import Client
+from pyrogram.types import Message
+
 import os
 import json
-
-from telegram import Update
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+import math
 
 # ---------------------------------------------------
-# ENV VARIABLES
+# ENV
 # ---------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
+
 BASE_URL = os.getenv("BASE_URL")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-# ---------------------------------------------------
-# DATABASE
-# ---------------------------------------------------
 DB_FILE = "/app/data/movies.json"
 
 # ---------------------------------------------------
-# DATABASE FUNCTIONS
+# PYROGRAM CLIENT
+# ---------------------------------------------------
+tg = Client(
+    "streamer",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING
+)
+
+# ---------------------------------------------------
+# FASTAPI
+# ---------------------------------------------------
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------
+# DATABASE
 # ---------------------------------------------------
 def load_movies():
 
@@ -41,92 +61,45 @@ def load_movies():
 
         return {}
 
-    except Exception as e:
-
-        print(f"DB Load Error: {e}")
+    except:
         return {}
 
 def save_movies(data):
 
-    try:
+    os.makedirs(
+        os.path.dirname(DB_FILE),
+        exist_ok=True
+    )
 
-        os.makedirs(
-            os.path.dirname(DB_FILE),
-            exist_ok=True
-        )
-
-        with open(DB_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-
-    except Exception as e:
-
-        print(f"DB Save Error: {e}")
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 # ---------------------------------------------------
-# TELEGRAM HANDLER
+# STARTUP
 # ---------------------------------------------------
-async def handle_movie(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+@app.on_event("startup")
+async def startup():
 
-    print("Webhook received")
+    await tg.start()
 
-    try:
+    print("Pyrogram started")
 
-        print(update)
+# ---------------------------------------------------
+# INDEX MOVIES
+# ---------------------------------------------------
+@app.get("/sync")
+async def sync_movies():
 
-        chat = update.effective_chat
+    current = {}
 
-        if not chat:
+    async for msg in tg.get_chat_history(
+        CHANNEL_ID
+    ):
 
-            print("No chat")
-            return
-
-        print(
-            "Incoming Chat ID:",
-            chat.id
-        )
-
-        print(
-            "Configured CHANNEL_ID:",
-            CHANNEL_ID
-        )
-
-        # ---------------------------------------------------
-        # CHECK CHANNEL
-        # ---------------------------------------------------
-        if chat.id != CHANNEL_ID:
-
-            print("Wrong channel")
-            return
-
-        # ---------------------------------------------------
-        # FIXED FOR CHANNEL POSTS
-        # ---------------------------------------------------
-        message = (
-            update.channel_post or
-            update.message
-        )
-
-        if not message:
-
-            print("No message")
-            return
-
-        media = (
-            message.video or
-            message.document
-        )
+        media = msg.video or msg.document
 
         if not media:
-
-            print("No media found")
-            return
-
-        file_id = media.file_id
-
-        current_files = load_movies()
+            continue
 
         filename = getattr(
             media,
@@ -135,10 +108,7 @@ async def handle_movie(
         )
 
         if not filename:
-
-            filename = (
-                f"Movie_{len(current_files)+1}"
-            )
+            continue
 
         movie_id = (
             filename
@@ -147,106 +117,26 @@ async def handle_movie(
             .lower()
         )
 
-        current_files[movie_id] = {
-            "name": filename,
-            "poster": "https://via.placeholder.com/300x450.png?text=Telegram+Movie",
-            "background": "https://via.placeholder.com/1280x720.png?text=Telegram+Movie",
-            "description": filename,
-            "file_id": file_id
+        current[movie_id] = {
+            "message_id": msg.id,
+            "file_name": filename,
+            "file_size": media.file_size
         }
 
-        save_movies(current_files)
+    save_movies(current)
 
-        print(
-            f"Added movie: {filename}"
-        )
-
-    except Exception as e:
-
-        print(
-            f"Telegram Handler Error: {e}"
-        )
-
-# ---------------------------------------------------
-# TELEGRAM APPLICATION
-# ---------------------------------------------------
-telegram_app = (
-    Application.builder()
-    .token(BOT_TOKEN)
-    .build()
-)
-
-telegram_app.add_handler(
-    MessageHandler(
-        filters.ALL,
-        handle_movie
-    )
-)
-
-# ---------------------------------------------------
-# FASTAPI LIFESPAN
-# ---------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-
-    try:
-
-        await telegram_app.initialize()
-
-        await telegram_app.start()
-
-        webhook_url = (
-            f"{BASE_URL}/telegram-webhook"
-        )
-
-        await telegram_app.bot.set_webhook(
-            url=webhook_url
-        )
-
-        print(
-            f"Webhook Set: {webhook_url}"
-        )
-
-    except Exception as e:
-
-        print(f"Lifespan Error: {e}")
-
-    yield
-
-    try:
-
-        await telegram_app.stop()
-
-        await telegram_app.shutdown()
-
-    except Exception as e:
-
-        print(f"Shutdown Error: {e}")
-
-# ---------------------------------------------------
-# FASTAPI APP
-# ---------------------------------------------------
-app = FastAPI(lifespan=lifespan)
-
-# ---------------------------------------------------
-# CORS
-# ---------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    return {
+        "movies": len(current)
+    }
 
 # ---------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "1.0.1",
+    "version": "2.0.0",
     "name": "Telegram Stream Addon",
-    "description": "Telegram streaming addon",
+    "description": "Telegram MTProto streaming",
 
     "resources": [
         "catalog",
@@ -258,14 +148,6 @@ manifest = {
         "movie"
     ],
 
-    "idPrefixes": [
-        "tg"
-    ],
-
-    "behaviorHints": {
-        "configurable": False
-    },
-
     "catalogs": [
         {
             "type": "movie",
@@ -275,9 +157,6 @@ manifest = {
     ]
 }
 
-# ---------------------------------------------------
-# MANIFEST ROUTE
-# ---------------------------------------------------
 @app.get("/manifest.json")
 async def get_manifest():
 
@@ -289,25 +168,25 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
 
-    current_files = load_movies()
+    movies = load_movies()
 
     metas = []
 
-    for movie_id, movie in current_files.items():
+    for movie_id, movie in movies.items():
 
         metas.append({
-            "id": f"tg:{movie_id}",
+            "id": movie_id,
             "type": "movie",
-            "name": movie["name"],
-            "poster": movie["poster"],
-            "background": movie["background"],
-            "description": movie["description"],
-            "posterShape": "poster"
+            "name": movie["file_name"],
+            "poster": (
+                "https://via.placeholder.com/"
+                "300x450.png?text=Telegram"
+            )
         })
 
-    return JSONResponse({
+    return {
         "metas": metas
-    })
+    }
 
 # ---------------------------------------------------
 # META
@@ -315,32 +194,27 @@ async def catalog():
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
 
-    clean_id = id.replace(
-        "tg:",
-        ""
-    )
+    movies = load_movies()
 
-    current_files = load_movies()
-
-    movie = current_files.get(clean_id)
+    movie = movies.get(id)
 
     if not movie:
 
-        return JSONResponse({
+        return {
             "meta": {}
-        })
+        }
 
-    return JSONResponse({
+    return {
         "meta": {
             "id": id,
             "type": "movie",
-            "name": movie["name"],
-            "poster": movie["poster"],
-            "background": movie["background"],
-            "description": movie["description"],
-            "posterShape": "poster"
+            "name": movie["file_name"],
+            "poster": (
+                "https://via.placeholder.com/"
+                "300x450.png?text=Telegram"
+            )
         }
-    })
+    }
 
 # ---------------------------------------------------
 # STREAM
@@ -348,127 +222,139 @@ async def meta(id: str):
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
 
-    clean_id = id.replace(
-        "tg:",
-        ""
-    )
+    movies = load_movies()
 
-    current_files = load_movies()
-
-    if clean_id not in current_files:
-
-        return JSONResponse({
-            "streams": []
-        })
-
-    movie = current_files[clean_id]
-
-    return JSONResponse({
-        "streams": [
-            {
-                "name": "☁️ Telegram",
-                "title": movie["name"],
-                "url": (
-                    f"{BASE_URL}/watch/"
-                    f"{clean_id}"
-                )
-            }
-        ]
-    })
-
-# ---------------------------------------------------
-# WATCH
-# ---------------------------------------------------
-@app.get("/watch/{id}")
-async def watch(id: str):
-
-    current_files = load_movies()
-
-    movie = current_files.get(id)
+    movie = movies.get(id)
 
     if not movie:
 
-        return JSONResponse({
-            "error": "Movie not found"
-        })
+        return {
+            "streams": []
+        }
 
-    file_id = movie["file_id"]
+    return {
+        "streams": [
+            {
+                "name": "☁️ Telegram",
+                "title": movie["file_name"],
 
-    try:
+                "url": (
+                    f"{BASE_URL}/watch/{id}"
+                ),
 
-        r = requests.get(
-            (
-                f"https://api.telegram.org/"
-                f"bot{BOT_TOKEN}/getFile"
-            ),
-            params={
-                "file_id": file_id
+                "behaviorHints": {
+                    "notWebReady": False
+                }
             }
-        ).json()
-
-        if not r.get("ok"):
-
-            return JSONResponse({
-                "error": (
-                    "Telegram API Error"
-                )
-            }, status_code=400)
-
-        file_path = (
-            r["result"]["file_path"]
-        )
-
-        tg_url = (
-            "https://api.telegram.org/"
-            f"file/bot{BOT_TOKEN}/"
-            f"{file_path}"
-        )
-
-        return RedirectResponse(tg_url)
-
-    except Exception as e:
-
-        return JSONResponse({
-            "error": str(e)
-        })
+        ]
+    }
 
 # ---------------------------------------------------
-# TELEGRAM WEBHOOK
+# RANGE PARSER
 # ---------------------------------------------------
-@app.post("/telegram-webhook")
-async def telegram_webhook(
+def parse_range(
+    range_header,
+    file_size
+):
+
+    start = 0
+    end = file_size - 1
+
+    if range_header:
+
+        bytes_range = (
+            range_header
+            .replace("bytes=", "")
+        )
+
+        parts = bytes_range.split("-")
+
+        if parts[0]:
+            start = int(parts[0])
+
+        if parts[1]:
+            end = int(parts[1])
+
+    return start, end
+
+# ---------------------------------------------------
+# STREAM FILE
+# ---------------------------------------------------
+@app.get("/watch/{movie_id}")
+async def watch(
+    movie_id: str,
     request: Request
 ):
 
-    try:
+    movies = load_movies()
 
-        data = await request.json()
+    movie = movies.get(movie_id)
 
-        print("Webhook POST received")
-        print(data)
+    if not movie:
 
-        update = Update.de_json(
-            data,
-            telegram_app.bot
+        raise HTTPException(
+            status_code=404,
+            detail="Movie not found"
         )
 
-        await telegram_app.process_update(
-            update
-        )
+    message_id = movie["message_id"]
 
-        return JSONResponse({
-            "ok": True
-        })
+    msg: Message = await tg.get_messages(
+        CHANNEL_ID,
+        message_id
+    )
 
-    except Exception as e:
+    media = msg.video or msg.document
 
-        print(
-            f"Webhook Error: {e}"
-        )
+    file_size = media.file_size
 
-        return JSONResponse({
-            "error": str(e)
-        })
+    range_header = request.headers.get(
+        "range"
+    )
+
+    start, end = parse_range(
+        range_header,
+        file_size
+    )
+
+    chunk_size = (
+        end - start
+    ) + 1
+
+    async def file_stream():
+
+        downloaded = 0
+
+        async for chunk in tg.stream_media(
+            message=msg,
+            offset=start
+        ):
+
+            downloaded += len(chunk)
+
+            yield chunk
+
+            if downloaded >= chunk_size:
+                break
+
+    headers = {
+        "Accept-Ranges": "bytes",
+
+        "Content-Range":
+            f"bytes {start}-{end}/{file_size}",
+
+        "Content-Length":
+            str(chunk_size),
+
+        "Content-Type":
+            "video/mp4"
+    }
+
+    return StreamingResponse(
+        file_stream(),
+        status_code=206,
+        headers=headers
+    )
 
 # ---------------------------------------------------
 # HOME
@@ -476,13 +362,9 @@ async def telegram_webhook(
 @app.get("/")
 async def home():
 
-    current_files = load_movies()
+    movies = load_movies()
 
-    return JSONResponse({
-        "status": "running",
-        "addon": "Telegram Stream Addon",
-        "movies_in_db": len(current_files),
-        "storage_path": DB_FILE,
-        "base_url": BASE_URL,
-        "channel_id": CHANNEL_ID
-    })
+    return {
+        "movies": len(movies),
+        "status": "running"
+    }
