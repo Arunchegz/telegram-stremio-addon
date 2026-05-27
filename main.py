@@ -71,16 +71,21 @@ async def handle_movie(
 ):
 
     print("Webhook received")
-    print(update)
 
     try:
 
-        # ---------------------------------------------------
-        # DEBUG CHAT ID
-        # ---------------------------------------------------
+        print(update)
+
+        chat = update.effective_chat
+
+        if not chat:
+
+            print("No chat")
+            return
+
         print(
             "Incoming Chat ID:",
-            update.effective_chat.id
+            chat.id
         )
 
         print(
@@ -91,12 +96,18 @@ async def handle_movie(
         # ---------------------------------------------------
         # CHECK CHANNEL
         # ---------------------------------------------------
-        if update.effective_chat.id != CHANNEL_ID:
+        if chat.id != CHANNEL_ID:
 
             print("Wrong channel")
             return
 
-        message = update.message
+        # ---------------------------------------------------
+        # FIXED FOR CHANNEL POSTS
+        # ---------------------------------------------------
+        message = (
+            update.channel_post or
+            update.message
+        )
 
         if not message:
 
@@ -146,7 +157,9 @@ async def handle_movie(
 
         save_movies(current_files)
 
-        print(f"Added movie: {filename}")
+        print(
+            f"Added movie: {filename}"
+        )
 
     except Exception as e:
 
