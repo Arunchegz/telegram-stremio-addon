@@ -1,4 +1,6 @@
 fastapi
 uvicorn
-requests
+pyrogram
+tgcrypto
 python-telegram-bot==20.7
+aiofiles
