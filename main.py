@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -6,9 +6,14 @@ from contextlib import asynccontextmanager
 import requests
 import os
 import json
-import threading
 
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -17,94 +22,116 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
 
-# Railway persistent volume path
+# ---------------------------------------------------
+# DATABASE FILE
+# ---------------------------------------------------
 DB_FILE = "/app/data/movies.json"
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
 # ---------------------------------------------------
 def load_movies():
+
     try:
+
         if os.path.exists(DB_FILE):
+
             with open(DB_FILE, "r") as f:
                 return json.load(f)
+
         return {}
+
     except Exception as e:
-        print(f"Error loading DB: {e}")
+
+        print(f"DB Load Error: {e}")
         return {}
 
 def save_movies(data):
+
     try:
-        os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+
+        os.makedirs(
+            os.path.dirname(DB_FILE),
+            exist_ok=True
+        )
 
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
     except Exception as e:
-        print(f"Error saving DB: {e}")
+
+        print(f"DB Save Error: {e}")
 
 # ---------------------------------------------------
 # TELEGRAM HANDLER
 # ---------------------------------------------------
-def handle_movie(update, context):
+async def handle_movie(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    if update.effective_chat.id != CHANNEL_ID:
-        return
+    try:
 
-    message = update.message
+        if update.effective_chat.id != CHANNEL_ID:
+            return
 
-    if not message:
-        return
+        message = update.message
 
-    media = message.video or message.document
+        if not message:
+            return
 
-    if not media:
-        return
+        media = message.video or message.document
 
-    file_id = media.file_id
+        if not media:
+            return
 
-    # Load latest DB
-    current_files = load_movies()
+        file_id = media.file_id
 
-    filename = getattr(media, "file_name", None)
+        current_files = load_movies()
 
-    if not filename:
-        filename = f"Movie_{len(current_files)+1}"
+        filename = getattr(media, "file_name", None)
 
-    movie_id = filename.replace(" ", "_").replace(".", "_").lower()
+        if not filename:
+            filename = f"Movie_{len(current_files)+1}"
 
-    # Save movie
-    current_files[movie_id] = {
-        "name": filename,
-        "poster": "https://via.placeholder.com/300x450.png?text=Telegram+Movie",
-        "background": "https://via.placeholder.com/1280x720.png?text=Telegram+Movie",
-        "description": filename,
-        "file_id": file_id
-    }
-
-    save_movies(current_files)
-
-    print(f"Added movie: {filename}")
-
-# ---------------------------------------------------
-# START BOT
-# ---------------------------------------------------
-def start_bot():
-
-    print("Starting Telegram Bot Polling...")
-
-    updater = Updater(BOT_TOKEN, use_context=True)
-
-    dp = updater.dispatcher
-
-    dp.add_handler(
-        MessageHandler(
-            Filters.video | Filters.document,
-            handle_movie
+        movie_id = (
+            filename
+            .replace(" ", "_")
+            .replace(".", "_")
+            .lower()
         )
-    )
 
-    updater.start_polling()
+        current_files[movie_id] = {
+            "name": filename,
+            "poster": "https://via.placeholder.com/300x450.png?text=Telegram+Movie",
+            "background": "https://via.placeholder.com/1280x720.png?text=Telegram+Movie",
+            "description": filename,
+            "file_id": file_id
+        }
+
+        save_movies(current_files)
+
+        print(f"Added movie: {filename}")
+
+    except Exception as e:
+
+        print(f"Telegram Handler Error: {e}")
+
+# ---------------------------------------------------
+# TELEGRAM APPLICATION
+# ---------------------------------------------------
+telegram_app = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
+
+telegram_app.add_handler(
+    MessageHandler(
+        filters.VIDEO | filters.Document.ALL,
+        handle_movie
+    )
+)
 
 # ---------------------------------------------------
 # FASTAPI LIFESPAN
@@ -112,18 +139,37 @@ def start_bot():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    print("Starting FastAPI App...")
+    try:
 
-    bot_thread = threading.Thread(
-        target=start_bot,
-        daemon=True
-    )
+        await telegram_app.initialize()
 
-    bot_thread.start()
+        await telegram_app.start()
+
+        webhook_url = (
+            f"{BASE_URL}/telegram-webhook"
+        )
+
+        await telegram_app.bot.set_webhook(
+            url=webhook_url
+        )
+
+        print(f"Webhook Set: {webhook_url}")
+
+    except Exception as e:
+
+        print(f"Lifespan Error: {e}")
 
     yield
 
-    print("Shutting down App...")
+    try:
+
+        await telegram_app.stop()
+
+        await telegram_app.shutdown()
+
+    except Exception as e:
+
+        print(f"Shutdown Error: {e}")
 
 # ---------------------------------------------------
 # FASTAPI APP
@@ -178,10 +224,11 @@ manifest = {
 }
 
 # ---------------------------------------------------
-# MANIFEST ROUTE
+# MANIFEST
 # ---------------------------------------------------
 @app.get("/manifest.json")
 async def get_manifest():
+
     return JSONResponse(manifest)
 
 # ---------------------------------------------------
@@ -223,6 +270,7 @@ async def meta(id: str):
     movie = current_files.get(clean_id)
 
     if not movie:
+
         return JSONResponse({
             "meta": {}
         })
@@ -250,6 +298,7 @@ async def stream(id: str):
     current_files = load_movies()
 
     if clean_id not in current_files:
+
         return JSONResponse({
             "streams": []
         })
@@ -277,6 +326,7 @@ async def watch(id: str):
     movie = current_files.get(id)
 
     if not movie:
+
         return JSONResponse({
             "error": "Movie not found"
         })
@@ -314,6 +364,33 @@ async def watch(id: str):
         })
 
 # ---------------------------------------------------
+# TELEGRAM WEBHOOK
+# ---------------------------------------------------
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+
+    try:
+
+        data = await request.json()
+
+        update = Update.de_json(
+            data,
+            telegram_app.bot
+        )
+
+        await telegram_app.process_update(update)
+
+        return JSONResponse({
+            "ok": True
+        })
+
+    except Exception as e:
+
+        return JSONResponse({
+            "error": str(e)
+        })
+
+# ---------------------------------------------------
 # HOME
 # ---------------------------------------------------
 @app.get("/")
@@ -325,5 +402,6 @@ async def home():
         "status": "running",
         "addon": "Telegram Stream Addon",
         "movies_in_db": len(current_files),
-        "storage_path": DB_FILE
+        "storage_path": DB_FILE,
+        "base_url": BASE_URL
     })
