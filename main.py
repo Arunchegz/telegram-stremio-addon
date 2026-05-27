@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 import requests
 import os
@@ -9,31 +10,18 @@ import threading
 
 from telegram.ext import Updater, MessageHandler, Filters
 
-app = FastAPI()
-
-# ---------------------------------------------------
-# CORS FIX FOR STREMIO WEB
-# ---------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # ---------------------------------------------------
 # ENV VARIABLES
 # ---------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
-# Added default 0 to prevent crashes if the var is missing
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0)) 
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", 0))
 
-DB_FILE = "movies.json"
+# Using Railway Volume path for persistent storage
+DB_FILE = "/app/data/movies.json"
 
 # ---------------------------------------------------
-# DATABASE
+# DATABASE FUNCTIONS
 # ---------------------------------------------------
 def load_movies():
     """Reads directly from disk every time it is called."""
@@ -42,15 +30,18 @@ def load_movies():
             with open(DB_FILE, "r") as f:
                 return json.load(f)
         return {}
-    except:
+    except Exception as e:
+        print(f"Error loading DB: {e}")
         return {}
 
 def save_movies(data):
+    """Saves data to disk, ensuring the directory exists."""
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------
-# TELEGRAM AUTO IMPORT
+# TELEGRAM MESSAGE HANDLER
 # ---------------------------------------------------
 def handle_movie(update, context):
     if update.effective_chat.id != CHANNEL_ID:
@@ -66,7 +57,7 @@ def handle_movie(update, context):
 
     file_id = media.file_id
     
-    # 1. Load the freshest database from disk
+    # Load the freshest database from disk
     current_files = load_movies()
     
     filename = getattr(media, "file_name", None)
@@ -75,7 +66,7 @@ def handle_movie(update, context):
 
     movie_id = filename.replace(" ", "_").lower()
 
-    # 2. Append the new movie
+    # Append the new movie
     current_files[movie_id] = {
         "name": filename,
         "poster": "https://via.placeholder.com/300x450.png?text=Telegram+Movie",
@@ -83,7 +74,7 @@ def handle_movie(update, context):
         "file_id": file_id
     }
 
-    # 3. Save it back to the disk
+    # Save it back to the disk
     save_movies(current_files)
     print(f"Added movie: {filename}")
 
@@ -91,6 +82,7 @@ def handle_movie(update, context):
 # START TELEGRAM BOT
 # ---------------------------------------------------
 def start_bot():
+    print("Starting Telegram polling...")
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
@@ -100,8 +92,34 @@ def start_bot():
 
     updater.start_polling()
 
-# Start bot in background thread (daemon=True ensures it closes when the app closes)
-threading.Thread(target=start_bot, daemon=True).start()
+# ---------------------------------------------------
+# FASTAPI LIFESPAN
+# ---------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Run bot in a background thread
+    print("Initializing App Lifespan...")
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+    
+    yield # Yield control back to FastAPI
+    
+    # Shutdown
+    print("Shutting down App...")
+
+# ---------------------------------------------------
+# APP INIT
+# ---------------------------------------------------
+app = FastAPI(lifespan=lifespan)
+
+# CORS FIX FOR STREMIO WEB
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------
 # STREMIO MANIFEST
@@ -131,7 +149,7 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-    current_files = load_movies() # Fetch fresh data!
+    current_files = load_movies()
     metas = []
 
     for movie_id, movie in current_files.items():
@@ -149,7 +167,7 @@ async def catalog():
 # ---------------------------------------------------
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
-    current_files = load_movies() # Fetch fresh data!
+    current_files = load_movies()
     movie = current_files.get(id)
 
     if not movie:
@@ -170,7 +188,7 @@ async def meta(id: str):
 # ---------------------------------------------------
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
-    current_files = load_movies() # Fetch fresh data!
+    current_files = load_movies()
     
     if id not in current_files:
         return {"streams": []}
@@ -190,7 +208,7 @@ async def stream(id: str):
 # ---------------------------------------------------
 @app.get("/watch/{id}")
 async def watch(id: str):
-    current_files = load_movies() # Fetch fresh data!
+    current_files = load_movies()
     movie = current_files.get(id)
 
     if not movie:
@@ -204,7 +222,6 @@ async def watch(id: str):
             params={"file_id": file_id}
         ).json()
 
-        # Catch the 20MB file size limit error
         if not r.get("ok"):
             return JSONResponse({"error": "Telegram API Error. File might be too large (>20MB)."}, status_code=400)
 
@@ -220,9 +237,9 @@ async def watch(id: str):
 # ---------------------------------------------------
 @app.get("/")
 async def home():
-    # Shows you how many movies are currently loaded in the database
     return {
         "status": "running",
         "addon": "Telegram Stream Addon",
-        "movies_in_db": len(load_movies())
+        "movies_in_db": len(load_movies()),
+        "storage_path": DB_FILE
     }
