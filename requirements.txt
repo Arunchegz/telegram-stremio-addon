@@ -2,5 +2,4 @@ fastapi
 uvicorn
 pyrogram
 tgcrypto
-python-telegram-bot==20.7
 aiofiles
