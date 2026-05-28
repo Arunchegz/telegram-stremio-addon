@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
@@ -19,7 +19,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 BASE_URL = os.getenv(
     "BASE_URL",
@@ -51,7 +51,7 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=max(1, int(os.getenv("WORKERS", 4)))
+    workers=4
 )
 
 # ---------------------------------------------------
@@ -83,44 +83,34 @@ def save_catalog():
         json.dump(catalog, f, indent=2)
 
 
-def format_size(size_bytes):
+def clean_title(filename):
 
-    if not size_bytes:
-        return "Unknown"
+    title = os.path.splitext(filename)[0]
 
-    size = float(size_bytes)
+    title = title.replace(".", " ")
+    title = title.replace("_", " ")
 
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-
-        size /= 1024
-
-    return f"{size:.2f} PB"
+    return re.sub(r"\s+", " ", title).strip()
 
 
 def detect_quality(filename):
 
     name = filename.lower()
 
-    if "2160p" in name or "4k" in name:
+    for q in [
+        "2160p",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+        "360p"
+    ]:
+
+        if q in name:
+            return q
+
+    if "4k" in name:
         return "2160p"
-
-    elif "1440p" in name:
-        return "1440p"
-
-    elif "1080p" in name:
-        return "1080p"
-
-    elif "720p" in name:
-        return "720p"
-
-    elif "480p" in name:
-        return "480p"
-
-    elif "360p" in name:
-        return "360p"
 
     return "Unknown"
 
@@ -129,72 +119,39 @@ def detect_resolution(filename):
 
     name = filename.lower()
 
-    patterns = [
-        r"3840x2160",
-        r"2560x1440",
-        r"1920x1080",
-        r"1280x720",
-        r"854x480",
-        r"640x360"
-    ]
+    mapping = {
+        "2160p": "3840x2160",
+        "1440p": "2560x1440",
+        "1080p": "1920x1080",
+        "720p": "1280x720",
+        "480p": "854x480",
+        "360p": "640x360"
+    }
 
-    for pattern in patterns:
+    for key, value in mapping.items():
 
-        match = re.search(pattern, name)
-
-        if match:
-            return match.group(0)
-
-    if "2160p" in name or "4k" in name:
-        return "3840x2160"
-
-    elif "1440p" in name:
-        return "2560x1440"
-
-    elif "1080p" in name:
-        return "1920x1080"
-
-    elif "720p" in name:
-        return "1280x720"
-
-    elif "480p" in name:
-        return "854x480"
-
-    elif "360p" in name:
-        return "640x360"
+        if key in name:
+            return value
 
     return "Unknown"
 
 
-def clean_title(filename):
+def format_size(size):
 
-    title = os.path.splitext(filename)[0]
+    if not size:
+        return "Unknown"
 
-    title = title.replace(".", " ")
-    title = title.replace("_", " ")
+    power = 1024
+    n = 0
+    labels = ["B", "KB", "MB", "GB", "TB"]
 
-    title = re.sub(r"\s+", " ", title)
+    while size > power:
 
-    return title.strip()
+        size /= power
+        n += 1
 
+    return f"{size:.2f} {labels[n]}"
 
-def create_stream(movie):
-
-    return {
-        "name": "Telegram",
-        "title": (
-            f"{movie['title']}\n"
-            f"💿 {movie['quality']}\n"
-            f"📺 {movie['resolution']}\n"
-            f"📦 {movie['size']}"
-        ),
-        "url": f"{BASE_URL}/proxy/{quote(movie['id'])}"
-    }
-
-
-# ---------------------------------------------------
-# ADD MOVIE
-# ---------------------------------------------------
 
 async def add_movie(message: Message):
 
@@ -203,10 +160,12 @@ async def add_movie(message: Message):
     if not media:
         return
 
-    filename = media.file_name or f"file_{message.id}.mkv"
+    filename = media.file_name or f"{message.id}.mkv"
+
+    movie_id = re.sub(r'[^a-zA-Z0-9]', '_', filename).lower()
 
     exists = next(
-        (x for x in catalog if x["id"] == filename),
+        (x for x in catalog if x["id"] == movie_id),
         None
     )
 
@@ -214,10 +173,10 @@ async def add_movie(message: Message):
         return
 
     movie = {
-        "id": filename,
-        "title": clean_title(filename),
+        "id": movie_id,
         "filename": filename,
         "message_id": message.id,
+        "title": clean_title(filename),
         "quality": detect_quality(filename),
         "resolution": detect_resolution(filename),
         "size": format_size(media.file_size)
@@ -227,7 +186,7 @@ async def add_movie(message: Message):
 
     save_catalog()
 
-    print(f"✅ Added: {filename}")
+    print(f"✅ Auto Synced: {filename}")
 
 
 # ---------------------------------------------------
@@ -236,33 +195,31 @@ async def add_movie(message: Message):
 
 async def full_sync():
 
-    print("🔄 Sync started")
+    print("🔄 Full sync started")
 
     try:
 
         async for message in tg.get_chat_history(CHANNEL_ID):
 
             try:
-
                 await add_movie(message)
 
             except Exception as e:
-
                 print("SYNC ITEM ERROR:", e)
+
+        print("✅ Full sync completed")
 
     except Exception as e:
 
         print("FULL SYNC ERROR:", e)
 
-    print("✅ Sync completed")
-
 
 # ---------------------------------------------------
-# AUTO SYNC NEW FILES
+# NEW FILES
 # ---------------------------------------------------
 
 @tg.on_message(filters.chat(CHANNEL_ID))
-async def new_file_handler(client, message):
+async def new_files(client, message):
 
     try:
 
@@ -270,7 +227,7 @@ async def new_file_handler(client, message):
 
     except Exception as e:
 
-        print("NEW MESSAGE ERROR:", e)
+        print("NEW FILE ERROR:", e)
 
 
 # ---------------------------------------------------
@@ -288,9 +245,19 @@ async def startup():
 
         print("✅ Pyrogram started")
 
-        await tg.get_chat(CHANNEL_ID)
+        me = await tg.get_me()
 
-        print("✅ Channel verified")
+        print(f"✅ Logged in as @{me.username}")
+
+        try:
+
+            chat = await tg.get_chat(CHANNEL_ID)
+
+            print(f"✅ Connected Channel: {chat.title}")
+
+        except Exception as e:
+
+            print(f"❌ CHANNEL ERROR: {e}")
 
         asyncio.create_task(full_sync())
 
@@ -308,28 +275,11 @@ async def shutdown():
 
     try:
 
-        if tg.is_connected:
-            await tg.stop()
-
-        print("🛑 Pyrogram stopped")
-
-    except RuntimeError as e:
-
-        print(f"⚠️ Shutdown warning: {e}")
+        await tg.stop()
 
     except Exception as e:
 
-        print(f"❌ Shutdown error: {e}")
-
-
-# ---------------------------------------------------
-# WEBHOOK
-# ---------------------------------------------------
-
-@app.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-
-    return {"ok": True}
+        print(f"⚠️ Shutdown loop warning: {e}")
 
 
 # ---------------------------------------------------
@@ -342,6 +292,38 @@ async def root():
     return {
         "status": "running",
         "movies": len(catalog)
+    }
+
+
+# ---------------------------------------------------
+# RESET
+# ---------------------------------------------------
+
+@app.get("/reset")
+async def reset():
+
+    global catalog
+
+    catalog = []
+
+    save_catalog()
+
+    return {
+        "status": "reset completed"
+    }
+
+
+# ---------------------------------------------------
+# MANUAL SYNC
+# ---------------------------------------------------
+
+@app.get("/sync")
+async def sync():
+
+    asyncio.create_task(full_sync())
+
+    return {
+        "status": "sync started"
     }
 
 
@@ -395,7 +377,7 @@ async def get_catalog():
 # ---------------------------------------------------
 
 @app.get("/meta/movie/{movie_id}.json")
-async def get_meta(movie_id: str):
+async def meta(movie_id: str):
 
     movie_id = movie_id.replace("tg:", "")
 
@@ -413,9 +395,9 @@ async def get_meta(movie_id: str):
             "type": "movie",
             "name": movie["title"],
             "description": (
-                f"Quality: {movie['quality']}\n"
-                f"Resolution: {movie['resolution']}\n"
-                f"Size: {movie['size']}"
+                f"🎬 {movie['quality']}\n"
+                f"📺 {movie['resolution']}\n"
+                f"📦 {movie['size']}"
             ),
             "poster": "https://stremio.github.io/stremio-art/logo.png"
         }
@@ -427,7 +409,7 @@ async def get_meta(movie_id: str):
 # ---------------------------------------------------
 
 @app.get("/stream/movie/{movie_id}.json")
-async def get_stream(movie_id: str):
+async def stream(movie_id: str):
 
     movie_id = movie_id.replace("tg:", "")
 
@@ -439,9 +421,21 @@ async def get_stream(movie_id: str):
     if not movie:
         raise HTTPException(404)
 
+    proxy_url = f"{BASE_URL}/proxy/{quote(movie['id'])}"
+
+    print(f"🔗 Generated Proxy URL: {movie['id']}")
+
     return {
         "streams": [
-            create_stream(movie)
+            {
+                "name": "Telegram",
+                "title": (
+                    f"{movie['quality']} | "
+                    f"{movie['resolution']} | "
+                    f"{movie['size']}"
+                ),
+                "url": proxy_url
+            }
         ]
     }
 
@@ -491,7 +485,7 @@ async def proxy(movie_id: str, request: Request):
 
     chunk_size = end - start + 1
 
-    async def stream_file():
+    async def file_stream():
 
         downloaded = 0
 
@@ -502,9 +496,9 @@ async def proxy(movie_id: str, request: Request):
 
             if downloaded + len(chunk) > chunk_size:
 
-                remaining = chunk_size - downloaded
+                remain = chunk_size - downloaded
 
-                yield chunk[:remaining]
+                yield chunk[:remain]
 
                 break
 
@@ -523,7 +517,7 @@ async def proxy(movie_id: str, request: Request):
     }
 
     return StreamingResponse(
-        stream_file(),
+        file_stream(),
         status_code=206 if range_header else 200,
         headers=headers
     )
