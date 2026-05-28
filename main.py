@@ -18,16 +18,17 @@ from pyrogram.errors import FloodWait
 import os
 import json
 import time
+import asyncio
 
 # ---------------------------------------------------
 # ENV VARIABLES
 # ---------------------------------------------------
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 
-BASE_URL = os.getenv("BASE_URL")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
+BASE_URL = os.getenv("BASE_URL", "")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
 
 DB_FILE = "/app/data/movies.json"
 
@@ -57,11 +58,14 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
-# MEMORY CACHE
+# MEMORY CACHE & LIMITS
 # ---------------------------------------------------
 MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
+
+# ⚡ CRITICAL: Limits parallel DC authorizations to prevent FloodWaits
+STREAM_LIMITER = asyncio.Semaphore(2)
 
 # ---------------------------------------------------
 # URL TTL
@@ -148,7 +152,7 @@ async def startup():
     await tg.start()
     try:
         await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Pyrogram started + DC warmed up (TgCrypto should be active)")
+        print("✅ Pyrogram started + DC warmed up (TgCrypto active)")
     except Exception as e:
         print(f"⚠️ Warm-up warning: {e}")
 
@@ -441,49 +445,39 @@ async def proxy_stream(movie_id: str, request: Request):
         chunk_offset = start // TG_CHUNK_SIZE
         skip_bytes = start % TG_CHUNK_SIZE
 
-        try:
-            async for chunk in tg.stream_media(
-                msg,
-                offset=chunk_offset
-            ):
-                # ⚡ CRITICAL: Kill stream if client seeks or closes player
-                if await request.is_disconnected():
-                    break
+        # ⚡ CRITICAL: Stops Stremio from spamming Telegram with 6 parallel requests
+        async with STREAM_LIMITER:
+            try:
+                async for chunk in tg.stream_media(
+                    msg,
+                    offset=chunk_offset
+                ):
+                    # ⚡ CRITICAL: Kill stream immediately if user skipped forward
+                    if await request.is_disconnected():
+                        break
 
-                if first_chunk:
-                    chunk = chunk[skip_bytes:]
-                    first_chunk = False
+                    if first_chunk:
+                        chunk = chunk[skip_bytes:]
+                        first_chunk = False
 
-                remaining = (end - start + 1) - sent
+                    remaining = (end - start + 1) - sent
 
-                if remaining <= 0:
-                    break
+                    if remaining <= 0:
+                        break
 
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
+                    if len(chunk) > remaining:
+                        chunk = chunk[:remaining]
 
-                sent += len(chunk)
-                yield chunk
+                    sent += len(chunk)
+                    yield chunk
 
-        except FloodWait as e:
-            print(f"\n🚨 FloodWait: {e.value}s\n")
-        except Exception:
-            # Client disconnects often throw exceptions, safely ignore to keep logs clean
-            pass
+            except FloodWait as e:
+                print(f"\n🚨 FloodWait: {e.value}s\n")
+            except Exception:
+                # Safely ignore client disconnect exceptions to keep terminal clean
+                pass
 
     # ---------------------------------------------------
     # HEADERS
     # ---------------------------------------------------
     headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Content-Type": content_type,
-        "Cache-Control": "public, max-age=3600",
-        "Connection": "keep-alive"
-    }
-
-    return StreamingResponse(
-        streamer(),
-        status_code=206,
-        headers=headers
-    )
