@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse
@@ -15,8 +15,12 @@ import json
 # ENV VARIABLES
 # ---------------------------------------------------
 API_ID = int(os.getenv("API_ID"))
+
 API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+
+SESSION_STRING = os.getenv(
+    "SESSION_STRING"
+)
 
 BASE_URL = os.getenv("BASE_URL")
 
@@ -65,7 +69,10 @@ def load_movies():
 
     except Exception as e:
 
-        print(f"DB Load Error: {e}")
+        print(
+            f"DB Load Error: {e}"
+        )
+
         return {}
 
 def save_movies(data):
@@ -78,11 +85,18 @@ def save_movies(data):
         )
 
         with open(DB_FILE, "w") as f:
-            json.dump(data, f, indent=4)
+
+            json.dump(
+                data,
+                f,
+                indent=4
+            )
 
     except Exception as e:
 
-        print(f"DB Save Error: {e}")
+        print(
+            f"DB Save Error: {e}"
+        )
 
 # ---------------------------------------------------
 # STARTUP
@@ -103,10 +117,12 @@ async def reset():
     try:
 
         if os.path.exists(DB_FILE):
+
             os.remove(DB_FILE)
 
         return {
-            "status": "database deleted"
+            "status":
+                "database deleted"
         }
 
     except Exception as e:
@@ -125,7 +141,9 @@ async def sync_movies():
 
         current = {}
 
-        # FORCE CHANNEL RESOLVE
+        # ----------------------------------------
+        # RESOLVE CHANNEL
+        # ----------------------------------------
         chat = await tg.get_chat(
             CHANNEL_USERNAME
         )
@@ -135,6 +153,9 @@ async def sync_movies():
             chat.title
         )
 
+        # ----------------------------------------
+        # GET CHAT HISTORY
+        # ----------------------------------------
         async for msg in tg.get_chat_history(
             CHANNEL_USERNAME
         ):
@@ -158,7 +179,6 @@ async def sync_movies():
                 if not filename:
                     continue
 
-                # SKIP INVALID FILES
                 if media.file_size is None:
                     continue
 
@@ -171,11 +191,14 @@ async def sync_movies():
 
                 current[movie_id] = {
 
-                    "message_id": msg.id,
+                    "message_id":
+                        msg.id,
 
-                    "file_name": filename,
+                    "file_name":
+                        filename,
 
-                    "file_size": media.file_size
+                    "file_size":
+                        media.file_size
                 }
 
             except Exception as inner_error:
@@ -204,14 +227,17 @@ async def sync_movies():
 # ---------------------------------------------------
 manifest = {
 
-    "id": "org.arun.telegram",
+    "id":
+        "org.arun.telegram",
 
-    "version": "4.0.0",
+    "version":
+        "5.0.0",
 
-    "name": "Telegram Stream Addon",
+    "name":
+        "Telegram Stream Addon",
 
     "description":
-        "Telegram MTProto Streaming Addon",
+        "Telegram MTProto Streaming",
 
     "resources": [
         "catalog",
@@ -229,11 +255,15 @@ manifest = {
 
     "catalogs": [
         {
-            "type": "movie",
 
-            "id": "telegrammovies",
+            "type":
+                "movie",
 
-            "name": "Telegram Movies"
+            "id":
+                "telegrammovies",
+
+            "name":
+                "Telegram Movies"
         }
     ]
 }
@@ -259,17 +289,21 @@ async def catalog():
     for movie_id, movie in movies.items():
 
         movie_name = (
-            movie.get("file_name") or
+            movie.get("file_name")
+            or
             "Unknown Movie"
         )
 
         metas.append({
 
-            "id": f"tg:{movie_id}",
+            "id":
+                f"tg:{movie_id}",
 
-            "type": "movie",
+            "type":
+                "movie",
 
-            "name": movie_name,
+            "name":
+                movie_name,
 
             "poster":
                 "https://placehold.co/300x450?text=Telegram",
@@ -277,9 +311,11 @@ async def catalog():
             "background":
                 "https://placehold.co/1280x720?text=Telegram",
 
-            "description": movie_name,
+            "description":
+                movie_name,
 
-            "posterShape": "poster"
+            "posterShape":
+                "poster"
         })
 
     return JSONResponse({
@@ -308,7 +344,8 @@ async def meta(id: str):
         })
 
     movie_name = (
-        movie.get("file_name") or
+        movie.get("file_name")
+        or
         "Unknown Movie"
     )
 
@@ -316,11 +353,14 @@ async def meta(id: str):
 
         "meta": {
 
-            "id": id,
+            "id":
+                id,
 
-            "type": "movie",
+            "type":
+                "movie",
 
-            "name": movie_name,
+            "name":
+                movie_name,
 
             "poster":
                 "https://placehold.co/300x450?text=Telegram",
@@ -328,9 +368,11 @@ async def meta(id: str):
             "background":
                 "https://placehold.co/1280x720?text=Telegram",
 
-            "description": movie_name,
+            "description":
+                movie_name,
 
-            "posterShape": "poster"
+            "posterShape":
+                "poster"
         }
     })
 
@@ -356,7 +398,8 @@ async def stream(id: str):
         })
 
     movie_name = (
-        movie.get("file_name") or
+        movie.get("file_name")
+        or
         "Unknown Movie"
     )
 
@@ -366,55 +409,30 @@ async def stream(id: str):
 
             {
 
-                "name": "☁️ Telegram",
+                "name":
+                    "☁️ Telegram",
 
-                "title": movie_name,
+                "title":
+                    movie_name,
 
                 "url":
                     f"{BASE_URL}/watch/{clean_id}",
 
                 "behaviorHints": {
-                    "notWebReady": True
+
+                    "notWebReady":
+                        True
                 }
             }
         ]
     })
 
 # ---------------------------------------------------
-# RANGE PARSER
-# ---------------------------------------------------
-def parse_range(
-    range_header,
-    file_size
-):
-
-    start = 0
-    end = file_size - 1
-
-    if range_header:
-
-        bytes_range = (
-            range_header
-            .replace("bytes=", "")
-        )
-
-        parts = bytes_range.split("-")
-
-        if parts[0]:
-            start = int(parts[0])
-
-        if len(parts) > 1 and parts[1]:
-            end = int(parts[1])
-
-    return start, end
-
-# ---------------------------------------------------
 # WATCH / STREAM
 # ---------------------------------------------------
 @app.get("/watch/{movie_id}")
 async def watch(
-    movie_id: str,
-    request: Request
+    movie_id: str
 ):
 
     movies = load_movies()
@@ -428,24 +446,18 @@ async def watch(
             detail="Movie not found"
         )
 
-    if "message_id" not in movie:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Old DB format detected. "
-                "Run /reset then /sync"
-            )
-        )
-
     message_id = movie["message_id"]
 
-    # FORCE RESOLVE CHAT
+    # ----------------------------------------
+    # RESOLVE CHANNEL
+    # ----------------------------------------
     await tg.get_chat(
         CHANNEL_USERNAME
     )
 
-    # GET TELEGRAM MESSAGE
+    # ----------------------------------------
+    # GET MESSAGE
+    # ----------------------------------------
     msg: Message = await tg.get_messages(
         CHANNEL_USERNAME,
         message_id
@@ -463,82 +475,50 @@ async def watch(
             detail="Media not found"
         )
 
-    file_size = media.file_size
-
-    if not file_size:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Invalid media size"
-        )
-
-    # RANGE HEADER
-    range_header = request.headers.get(
-        "range"
-    )
-
-    start, end = parse_range(
-        range_header,
-        file_size
-    )
-
-    chunk_size = (
-        end - start
-    ) + 1
-
-    # STREAM GENERATOR
-    async def file_stream():
-
-        downloaded = 0
-
-        async for chunk in tg.stream_media(
-            message=msg,
-            offset=start
-        ):
-
-            downloaded += len(chunk)
-
-            yield chunk
-
-            if downloaded >= chunk_size:
-                break
-
-    # DETECT CONTENT TYPE
     filename = (
         movie.get("file_name", "")
         .lower()
     )
 
+    # ----------------------------------------
+    # CONTENT TYPE
+    # ----------------------------------------
     content_type = "video/mp4"
 
     if filename.endswith(".mkv"):
-        content_type = "video/x-matroska"
 
-    elif filename.endswith(".mp4"):
-        content_type = "video/mp4"
+        content_type = (
+            "video/x-matroska"
+        )
 
     elif filename.endswith(".webm"):
-        content_type = "video/webm"
 
-    # HEADERS
-    headers = {
+        content_type = (
+            "video/webm"
+        )
 
-        "Accept-Ranges": "bytes",
+    # ----------------------------------------
+    # SIMPLE STREAM
+    # ----------------------------------------
+    async def file_stream():
 
-        "Content-Range":
-            f"bytes {start}-{end}/{file_size}",
+        async for chunk in tg.stream_media(
+            msg
+        ):
 
-        "Content-Length":
-            str(chunk_size),
-
-        "Content-Type":
-            content_type
-    }
+            yield chunk
 
     return StreamingResponse(
+
         file_stream(),
-        status_code=206,
-        headers=headers
+
+        media_type=content_type,
+
+        headers={
+
+            "Accept-Ranges":
+                "bytes"
+        }
     )
 
 # ---------------------------------------------------
@@ -551,13 +531,17 @@ async def home():
 
     return {
 
-        "status": "running",
+        "status":
+            "running",
 
-        "movies": len(movies),
+        "movies":
+            len(movies),
 
-        "storage_path": DB_FILE,
+        "storage_path":
+            DB_FILE,
 
-        "base_url": BASE_URL,
+        "base_url":
+            BASE_URL,
 
         "channel_username":
             CHANNEL_USERNAME
