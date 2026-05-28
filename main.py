@@ -5,11 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-import asyncio
 import os
 import re
 import json
-import time
 import mimetypes
 
 # =========================================================
@@ -20,7 +18,6 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Use channel username now
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 
 BASE_URL = os.getenv("BASE_URL")
@@ -58,9 +55,12 @@ tg = Client(
 DB_FILE = "movies.json"
 
 if os.path.exists(DB_FILE):
+
     with open(DB_FILE, "r") as f:
         MOVIES = json.load(f)
+
 else:
+
     MOVIES = {}
 
 # =========================================================
@@ -68,13 +68,18 @@ else:
 # =========================================================
 
 def save_db():
+
     with open(DB_FILE, "w") as f:
         json.dump(MOVIES, f, indent=2)
 
+
 def clean_name(name):
+
     name = re.sub(r"\.(mkv|mp4|avi)$", "", name, flags=re.I)
     name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
+
     return name.lower().strip("_")
+
 
 def extract_resolution(filename):
 
@@ -91,10 +96,12 @@ def extract_resolution(filename):
     ]
 
     for r in resolutions:
+
         if r in filename:
             return r.upper()
 
     return "HD"
+
 
 def extract_year(filename):
 
@@ -104,6 +111,7 @@ def extract_year(filename):
         return match.group(1)
 
     return ""
+
 
 async def add_movie(message: Message):
 
@@ -140,10 +148,33 @@ async def add_movie(message: Message):
 async def new_post(_, message):
 
     try:
+
         await add_movie(message)
 
     except Exception as e:
+
         print("ADD MOVIE ERROR:", e)
+
+# =========================================================
+# TELEGRAM WEBHOOK
+# =========================================================
+
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+
+    try:
+
+        data = await request.json()
+
+        await tg.handle_updates(data)
+
+        return {"ok": True}
+
+    except Exception as e:
+
+        print("WEBHOOK ERROR:", e)
+
+        return {"ok": False}
 
 # =========================================================
 # STARTUP / SHUTDOWN
@@ -163,6 +194,12 @@ async def startup():
         print(f"✅ Connected Channel: {chat.title}")
         print(f"✅ Channel Username: {chat.username}")
 
+        await tg.set_webhook(
+            url=f"{BASE_URL}/telegram-webhook"
+        )
+
+        print("✅ Webhook Set")
+
     except Exception as e:
 
         print(f"STARTUP ERROR: {e}")
@@ -172,11 +209,15 @@ async def shutdown():
 
     try:
 
-        await tg.stop()
+        if tg.is_connected:
+            await tg.stop()
+
+    except RuntimeError:
+        pass
 
     except Exception as e:
 
-        print(f"⚠️ Shutdown loop warning: {e}")
+        print(f"Shutdown Error: {e}")
 
 # =========================================================
 # CATALOG
@@ -236,11 +277,11 @@ async def stream(movie_id: str):
     if movie_id not in MOVIES:
         raise HTTPException(404)
 
+    movie = MOVIES[movie_id]
+
     proxy_url = f"{BASE_URL}/proxy/{movie_id}"
 
     print(f"🔗 Generated Proxy URL: {movie_id}")
-
-    movie = MOVIES[movie_id]
 
     streams = [{
         "name": f"Telegram {movie['resolution']}",
@@ -251,7 +292,7 @@ async def stream(movie_id: str):
     return JSONResponse({"streams": streams})
 
 # =========================================================
-# PROXY STREAMING
+# PROXY STREAM
 # =========================================================
 
 @app.get("/proxy/{movie_id}")
@@ -264,22 +305,31 @@ async def proxy_stream(movie_id: str, request: Request):
 
     message_id = movie["message_id"]
 
-    msg = await tg.get_messages(CHANNEL_USERNAME, message_id)
+    msg = await tg.get_messages(
+        CHANNEL_USERNAME,
+        message_id
+    )
 
     media = msg.video or msg.document
 
     file_size = media.file_size
 
-    mime_type = mimetypes.guess_type(movie["file_name"])[0] or "video/mp4"
+    mime_type = (
+        mimetypes.guess_type(movie["file_name"])[0]
+        or "video/mp4"
+    )
 
-    range_header = request.headers.get("range", None)
+    range_header = request.headers.get("range")
 
     start = 0
     end = file_size - 1
 
     if range_header:
 
-        match = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        match = re.search(
+            r"bytes=(\d+)-(\d*)",
+            range_header
+        )
 
         if match:
 
@@ -296,7 +346,10 @@ async def proxy_stream(movie_id: str, request: Request):
 
         while offset <= end:
 
-            limit = min(1024 * 1024, end - offset + 1)
+            limit = min(
+                1024 * 1024,
+                end - offset + 1
+            )
 
             chunk = await tg.stream_media(
                 message=msg,
