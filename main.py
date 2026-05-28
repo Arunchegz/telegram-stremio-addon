@@ -116,6 +116,100 @@ def save_movies(data):
         print("❌ DB Save Error:", e)
 
 # =========================================================
+# SYNC LATEST MOVIES
+# =========================================================
+async def sync_latest_movies(limit=20):
+
+    global MESSAGES_CACHE
+
+    try:
+
+        movies = load_movies()
+
+        chat = await tg.get_chat(CHANNEL_USERNAME)
+
+        updated = False
+
+        async for msg in tg.get_chat_history(
+            chat.id,
+            limit=limit
+        ):
+
+            media = (
+                msg.video
+                or msg.document
+                or msg.animation
+                or msg.audio
+                or msg.voice
+                or msg.video_note
+            )
+
+            if not media:
+                continue
+
+            filename = getattr(
+                media,
+                "file_name",
+                None
+            )
+
+            if not filename:
+
+                mime = getattr(
+                    media,
+                    "mime_type",
+                    ""
+                )
+
+                ext = "mp4"
+
+                if "mkv" in mime:
+                    ext = "mkv"
+
+                elif "webm" in mime:
+                    ext = "webm"
+
+                elif "mp3" in mime:
+                    ext = "mp3"
+
+                filename = f"telegram_{msg.id}.{ext}"
+
+            movie_id = (
+                filename
+                .replace(" ", "_")
+                .replace(".", "_")
+                .replace("-", "_")
+                .lower()
+            )
+
+            # Already synced
+            if movie_id in movies:
+                continue
+
+            movies[movie_id] = {
+                "message_id": msg.id,
+                "file_name": filename,
+                "file_size": getattr(
+                    media,
+                    "file_size",
+                    0
+                )
+            }
+
+            MESSAGES_CACHE[movie_id] = msg
+
+            updated = True
+
+            print(f"🎬 Synced: {filename}")
+
+        if updated:
+            save_movies(movies)
+
+    except Exception as e:
+
+        print(f"❌ Sync Error: {e}")
+
+# =========================================================
 # GET MESSAGE
 # =========================================================
 async def get_message(
@@ -305,132 +399,11 @@ async def reset():
         }
 
 # =========================================================
-# SYNC
-# =========================================================
-@app.get("/sync")
-async def sync_movies():
-
-    global MESSAGES_CACHE
-
-    try:
-
-        current = {}
-
-        print(f"📡 Syncing: {CHANNEL_USERNAME}")
-
-        chat = await tg.get_chat(CHANNEL_USERNAME)
-
-        print(f"✅ Connected: {chat.title}")
-
-        total_messages = 0
-        media_messages = 0
-
-        async for msg in tg.get_chat_history(
-            chat.id,
-            limit=5000
-        ):
-
-            total_messages += 1
-
-            try:
-
-                media = (
-                    msg.video
-                    or msg.document
-                    or msg.animation
-                    or msg.audio
-                    or msg.voice
-                    or msg.video_note
-                )
-
-                if not media:
-                    continue
-
-                media_messages += 1
-
-                filename = getattr(
-                    media,
-                    "file_name",
-                    None
-                )
-
-                if not filename:
-
-                    mime = getattr(
-                        media,
-                        "mime_type",
-                        ""
-                    )
-
-                    ext = "mp4"
-
-                    if "mkv" in mime:
-                        ext = "mkv"
-
-                    elif "webm" in mime:
-                        ext = "webm"
-
-                    elif "mp3" in mime:
-                        ext = "mp3"
-
-                    filename = f"telegram_{msg.id}.{ext}"
-
-                movie_id = (
-                    filename
-                    .replace(" ", "_")
-                    .replace(".", "_")
-                    .replace("-", "_")
-                    .lower()
-                )
-
-                current[movie_id] = {
-                    "message_id": msg.id,
-                    "file_name": filename,
-                    "file_size": getattr(
-                        media,
-                        "file_size",
-                        0
-                    )
-                }
-
-                MESSAGES_CACHE[movie_id] = msg
-
-                print(f"✅ Added: {filename}")
-
-            except Exception as inner_error:
-
-                print(
-                    f"⚠️ Skipped {msg.id}: {inner_error}"
-                )
-
-        save_movies(current)
-
-        return {
-            "status": "success",
-            "total_messages": total_messages,
-            "media_messages": media_messages,
-            "synced": len(current),
-            "messages_cached": len(MESSAGES_CACHE)
-        }
-
-    except Exception as e:
-
-        print("❌ Sync Error:", e)
-
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "error": str(e)
-            }
-        )
-
-# =========================================================
 # MANIFEST
 # =========================================================
 manifest = {
     "id": "org.arun.telegram",
-    "version": "19.0.0",
+    "version": "21.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
     "resources": [
@@ -463,6 +436,9 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
 
+    # Auto sync when Stremio opens catalog
+    await sync_latest_movies()
+
     movies = load_movies()
 
     metas = []
@@ -493,6 +469,9 @@ async def catalog():
 # =========================================================
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
+
+    # Auto sync when Stremio opens meta
+    await sync_latest_movies()
 
     clean_id = id.replace("tg:", "")
 
@@ -527,6 +506,9 @@ async def meta(id: str):
 # =========================================================
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
+
+    # Auto sync when Stremio opens stream
+    await sync_latest_movies()
 
     clean_id = id.replace("tg:", "")
 
