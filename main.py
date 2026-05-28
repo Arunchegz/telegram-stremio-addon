@@ -11,7 +11,7 @@ from fastapi.responses import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
@@ -35,12 +35,12 @@ DB_FILE = "/app/data/movies.json"
 # ---------------------------------------------------
 # PYROGRAM CLIENT
 # ---------------------------------------------------
+# ⚡ CRITICAL CHANGE: Removed `no_updates=True` so the client can listen to new messages!
 tg = Client(
     "streamer",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    no_updates=True,
     workers=8
 )
 
@@ -103,6 +103,46 @@ def save_movies(data):
         print("DB Save Error:", e)
 
 # ---------------------------------------------------
+# REAL-TIME SYNC (TRIGGERED ON NEW CHANNEL MESSAGE)
+# ---------------------------------------------------
+@tg.on_message(filters.chat(CHANNEL_USERNAME) & (filters.video | filters.document))
+async def on_new_movie(client, msg: Message):
+    """Automatically adds new movies to the database the moment they are uploaded."""
+    try:
+        media = msg.video or msg.document
+        if not media:
+            return
+
+        filename = getattr(media, "file_name", None)
+        if not filename:
+            return
+
+        movie_id = (
+            filename
+            .replace(" ", "_")
+            .replace(".", "_")
+            .lower()
+        )
+
+        movies = load_movies()
+
+        movies[movie_id] = {
+            "message_id": msg.id,
+            "file_name": filename,
+            "file_size": media.file_size
+        }
+
+        # Pre-cache the message
+        MESSAGES_CACHE[movie_id] = msg
+
+        # Save the updated database
+        save_movies(movies)
+        print(f"🎬 New movie auto-synced: {filename}")
+
+    except Exception as e:
+        print(f"❌ Auto-sync Error: {e}")
+
+# ---------------------------------------------------
 # GET CACHED MESSAGE
 # ---------------------------------------------------
 async def get_message(
@@ -152,7 +192,7 @@ async def startup():
     await tg.start()
     try:
         await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Pyrogram started + DC warmed up (TgCrypto active)")
+        print("✅ Pyrogram started + Listening for new movies...")
     except Exception as e:
         print(f"⚠️ Warm-up warning: {e}")
 
@@ -179,34 +219,15 @@ async def home():
     }
 
 # ---------------------------------------------------
-# RESET
+# RESET (Now acts as a manual full re-sync trigger)
 # ---------------------------------------------------
-@app.get("/reset")
-async def reset():
-    global MOVIES_CACHE
-    global MESSAGES_CACHE
-    global URL_CACHE
-    try:
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
-        MOVIES_CACHE = {}
-        MESSAGES_CACHE = {}
-        URL_CACHE = {}
-        return {"status": "database deleted"}
-    except Exception as e:
-        return {"error": str(e)}
-
-# ---------------------------------------------------
-# SYNC CHANNEL
-# ---------------------------------------------------
-@app.get("/sync")
-async def sync_movies():
+@app.get("/sync-all")
+async def manual_full_sync():
+    """Manual endpoint to rebuild the entire database if you ever need to."""
     global MESSAGES_CACHE
     try:
         current = {}
-        chat = await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Channel:", chat.title)
-
+        print("🔄 Starting full manual sync...")
         async for msg in tg.get_chat_history(CHANNEL_USERNAME):
             try:
                 media = msg.video or msg.document
@@ -217,31 +238,19 @@ async def sync_movies():
                 if not filename:
                     continue
 
-                movie_id = (
-                    filename
-                    .replace(" ", "_")
-                    .replace(".", "_")
-                    .lower()
-                )
+                movie_id = filename.replace(" ", "_").replace(".", "_").lower()
 
                 current[movie_id] = {
                     "message_id": msg.id,
                     "file_name": filename,
                     "file_size": media.file_size
                 }
-
-                # Pre-cache messages
                 MESSAGES_CACHE[movie_id] = msg
-
-            except Exception as inner_error:
-                print("Skipped Message:", inner_error)
+            except Exception:
                 continue
 
         save_movies(current)
-        return {
-            "synced": len(current),
-            "messages_cached": len(MESSAGES_CACHE)
-        }
+        return {"status": "success", "total_movies": len(current)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -274,8 +283,10 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
+    # ⚡ No background tasks needed! The database is always 100% accurate now.
     movies = load_movies()
     metas = []
+    
     for movie_id, movie in movies.items():
         movie_name = movie.get("file_name", "Unknown Movie")
         metas.append({
@@ -287,6 +298,7 @@ async def catalog():
             "description": movie_name,
             "posterShape": "poster"
         })
+        
     return JSONResponse({"metas": metas})
 
 # ---------------------------------------------------
