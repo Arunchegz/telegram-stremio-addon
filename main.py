@@ -1,36 +1,33 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
+import asyncio
 import os
 import re
 import json
-import asyncio
-from urllib.parse import quote
+import time
+import mimetypes
 
-# ---------------------------------------------------
+# =========================================================
 # ENV
-# ---------------------------------------------------
+# =========================================================
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# Use channel username now
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 
-BASE_URL = os.getenv(
-    "BASE_URL",
-    "https://your-app.up.railway.app"
-)
+BASE_URL = os.getenv("BASE_URL")
 
-CATALOG_FILE = "catalog.json"
-
-# ---------------------------------------------------
+# =========================================================
 # FASTAPI
-# ---------------------------------------------------
+# =========================================================
 
 app = FastAPI()
 
@@ -42,201 +39,133 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------
+# =========================================================
 # PYROGRAM
-# ---------------------------------------------------
+# =========================================================
 
 tg = Client(
-    "telegram-session",
+    "telegram-stream-bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=4
+    workers=1
 )
 
-# ---------------------------------------------------
-# CACHE
-# ---------------------------------------------------
+# =========================================================
+# DATABASE
+# =========================================================
 
-catalog = []
+DB_FILE = "movies.json"
 
-# ---------------------------------------------------
+if os.path.exists(DB_FILE):
+    with open(DB_FILE, "r") as f:
+        MOVIES = json.load(f)
+else:
+    MOVIES = {}
+
+# =========================================================
 # HELPERS
-# ---------------------------------------------------
+# =========================================================
 
-def load_catalog():
+def save_db():
+    with open(DB_FILE, "w") as f:
+        json.dump(MOVIES, f, indent=2)
 
-    global catalog
+def clean_name(name):
+    name = re.sub(r"\.(mkv|mp4|avi)$", "", name, flags=re.I)
+    name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
+    return name.lower().strip("_")
 
-    if os.path.exists(CATALOG_FILE):
+def extract_resolution(filename):
 
-        with open(CATALOG_FILE, "r") as f:
-            catalog = json.load(f)
+    filename = filename.lower()
 
-    else:
-        catalog = []
-
-
-def save_catalog():
-
-    with open(CATALOG_FILE, "w") as f:
-        json.dump(catalog, f, indent=2)
-
-
-def clean_title(filename):
-
-    title = os.path.splitext(filename)[0]
-
-    title = title.replace(".", " ")
-    title = title.replace("_", " ")
-
-    return re.sub(r"\s+", " ", title).strip()
-
-
-def detect_quality(filename):
-
-    name = filename.lower()
-
-    for q in [
+    resolutions = [
         "2160p",
+        "4k",
         "1440p",
         "1080p",
         "720p",
         "480p",
         "360p"
-    ]:
+    ]
 
-        if q in name:
-            return q
+    for r in resolutions:
+        if r in filename:
+            return r.upper()
 
-    if "4k" in name:
-        return "2160p"
+    return "HD"
 
-    return "Unknown"
+def extract_year(filename):
 
+    match = re.search(r"(19\d{2}|20\d{2})", filename)
 
-def detect_resolution(filename):
+    if match:
+        return match.group(1)
 
-    name = filename.lower()
-
-    mapping = {
-        "2160p": "3840x2160",
-        "1440p": "2560x1440",
-        "1080p": "1920x1080",
-        "720p": "1280x720",
-        "480p": "854x480",
-        "360p": "640x360"
-    }
-
-    for key, value in mapping.items():
-
-        if key in name:
-            return value
-
-    return "Unknown"
-
-
-def format_size(size):
-
-    if not size:
-        return "Unknown"
-
-    power = 1024
-    n = 0
-    labels = ["B", "KB", "MB", "GB", "TB"]
-
-    while size > power:
-
-        size /= power
-        n += 1
-
-    return f"{size:.2f} {labels[n]}"
-
+    return ""
 
 async def add_movie(message: Message):
 
+    if not message.video and not message.document:
+        return
+
     media = message.video or message.document
 
-    if not media:
-        return
+    file_name = media.file_name or f"{message.id}.mp4"
 
-    filename = media.file_name or f"{message.id}.mkv"
+    movie_id = clean_name(file_name)
 
-    movie_id = re.sub(r'[^a-zA-Z0-9]', '_', filename).lower()
+    resolution = extract_resolution(file_name)
 
-    exists = next(
-        (x for x in catalog if x["id"] == movie_id),
-        None
-    )
+    year = extract_year(file_name)
 
-    if exists:
-        return
-
-    movie = {
-        "id": movie_id,
-        "filename": filename,
+    MOVIES[movie_id] = {
         "message_id": message.id,
-        "title": clean_title(filename),
-        "quality": detect_quality(filename),
-        "resolution": detect_resolution(filename),
-        "size": format_size(media.file_size)
+        "file_name": file_name,
+        "size": media.file_size,
+        "resolution": resolution,
+        "year": year
     }
 
-    catalog.append(movie)
+    save_db()
 
-    save_catalog()
+    print(f"✅ Auto Synced: {file_name}")
 
-    print(f"✅ Auto Synced: {filename}")
-
-
-# ---------------------------------------------------
-# AUTO NEW FILE SYNC
-# ---------------------------------------------------
+# =========================================================
+# TELEGRAM LISTENER
+# =========================================================
 
 @tg.on_message(filters.chat(CHANNEL_USERNAME))
-async def new_files(client, message):
+async def new_post(_, message):
 
     try:
-
         await add_movie(message)
 
     except Exception as e:
+        print("ADD MOVIE ERROR:", e)
 
-        print("NEW FILE ERROR:", e)
-
-
-# ---------------------------------------------------
-# STARTUP
-# ---------------------------------------------------
+# =========================================================
+# STARTUP / SHUTDOWN
+# =========================================================
 
 @app.on_event("startup")
 async def startup():
 
-    load_catalog()
-
     try:
 
-        await asyncio.sleep(2)
-
         await tg.start()
-
-        await tg.get_me()
 
         print("✅ Pyrogram started")
 
         chat = await tg.get_chat(CHANNEL_USERNAME)
 
         print(f"✅ Connected Channel: {chat.title}")
-        print(f"✅ Channel Username: {CHANNEL_USERNAME}")
+        print(f"✅ Channel Username: {chat.username}")
 
     except Exception as e:
 
-        print(f"❌ CHANNEL ERROR: {e}")
-
-
-# ---------------------------------------------------
-# SHUTDOWN
-# ---------------------------------------------------
+        print(f"STARTUP ERROR: {e}")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -249,186 +178,108 @@ async def shutdown():
 
         print(f"⚠️ Shutdown loop warning: {e}")
 
-
-# ---------------------------------------------------
-# ROOT
-# ---------------------------------------------------
-
-@app.get("/")
-async def root():
-
-    return {
-        "status": "running",
-        "movies": len(catalog)
-    }
-
-
-# ---------------------------------------------------
-# RESET
-# ---------------------------------------------------
-
-@app.get("/reset")
-async def reset():
-
-    global catalog
-
-    catalog = []
-
-    save_catalog()
-
-    return {
-        "status": "reset completed"
-    }
-
-
-# ---------------------------------------------------
-# MANIFEST
-# ---------------------------------------------------
-
-@app.get("/manifest.json")
-async def manifest():
-
-    return {
-        "id": "org.telegram.stream",
-        "version": "1.0.0",
-        "name": "Telegram Movies",
-        "description": "Telegram Streaming Addon",
-        "resources": ["catalog", "meta", "stream"],
-        "types": ["movie"],
-        "catalogs": [
-            {
-                "type": "movie",
-                "id": "telegrammovies",
-                "name": "Telegram Movies"
-            }
-        ]
-    }
-
-
-# ---------------------------------------------------
+# =========================================================
 # CATALOG
-# ---------------------------------------------------
+# =========================================================
 
 @app.get("/catalog/movie/telegrammovies.json")
-async def get_catalog():
+async def catalog():
 
     metas = []
 
-    for movie in reversed(catalog[-200:]):
+    for movie_id, movie in MOVIES.items():
 
         metas.append({
-            "id": f"tg:{movie['id']}",
+            "id": f"tg:{movie_id}",
             "type": "movie",
-            "name": movie["title"],
-            "poster": "https://stremio.github.io/stremio-art/logo.png"
+            "name": movie["file_name"],
+            "poster": "https://via.placeholder.com/300x450.png?text=Telegram",
+            "description": movie["file_name"]
         })
 
-    return {"metas": metas}
+    return JSONResponse({"metas": metas})
 
-
-# ---------------------------------------------------
+# =========================================================
 # META
-# ---------------------------------------------------
+# =========================================================
 
 @app.get("/meta/movie/{movie_id}.json")
 async def meta(movie_id: str):
 
     movie_id = movie_id.replace("tg:", "")
 
-    movie = next(
-        (x for x in catalog if x["id"] == movie_id),
-        None
-    )
-
-    if not movie:
+    if movie_id not in MOVIES:
         raise HTTPException(404)
 
-    return {
-        "meta": {
-            "id": f"tg:{movie['id']}",
-            "type": "movie",
-            "name": movie["title"],
-            "description": (
-                f"🎬 {movie['quality']}\n"
-                f"📺 {movie['resolution']}\n"
-                f"📦 {movie['size']}"
-            ),
-            "poster": "https://stremio.github.io/stremio-art/logo.png"
-        }
+    movie = MOVIES[movie_id]
+
+    meta = {
+        "id": f"tg:{movie_id}",
+        "type": "movie",
+        "name": movie["file_name"],
+        "poster": "https://via.placeholder.com/300x450.png?text=Telegram",
+        "description": movie["file_name"],
+        "releaseInfo": movie["year"]
     }
 
+    return JSONResponse({"meta": meta})
 
-# ---------------------------------------------------
+# =========================================================
 # STREAM
-# ---------------------------------------------------
+# =========================================================
 
 @app.get("/stream/movie/{movie_id}.json")
 async def stream(movie_id: str):
 
     movie_id = movie_id.replace("tg:", "")
 
-    movie = next(
-        (x for x in catalog if x["id"] == movie_id),
-        None
-    )
-
-    if not movie:
+    if movie_id not in MOVIES:
         raise HTTPException(404)
 
-    proxy_url = f"{BASE_URL}/proxy/{quote(movie['id'])}"
+    proxy_url = f"{BASE_URL}/proxy/{movie_id}"
 
-    print(f"🔗 Generated Proxy URL: {movie['id']}")
+    print(f"🔗 Generated Proxy URL: {movie_id}")
 
-    return {
-        "streams": [
-            {
-                "name": "Telegram",
-                "title": (
-                    f"{movie['quality']} | "
-                    f"{movie['resolution']} | "
-                    f"{movie['size']}"
-                ),
-                "url": proxy_url
-            }
-        ]
-    }
+    movie = MOVIES[movie_id]
 
+    streams = [{
+        "name": f"Telegram {movie['resolution']}",
+        "title": movie["file_name"],
+        "url": proxy_url
+    }]
 
-# ---------------------------------------------------
-# PROXY
-# ---------------------------------------------------
+    return JSONResponse({"streams": streams})
 
-@app.api_route("/proxy/{movie_id:path}", methods=["GET", "HEAD"])
-async def proxy(movie_id: str, request: Request):
+# =========================================================
+# PROXY STREAMING
+# =========================================================
 
-    movie = next(
-        (x for x in catalog if x["id"] == movie_id),
-        None
-    )
+@app.get("/proxy/{movie_id}")
+async def proxy_stream(movie_id: str, request: Request):
 
-    if not movie:
+    if movie_id not in MOVIES:
         raise HTTPException(404)
 
-    message = await tg.get_messages(
-        CHANNEL_USERNAME,
-        movie["message_id"]
-    )
+    movie = MOVIES[movie_id]
 
-    media = message.video or message.document
+    message_id = movie["message_id"]
 
-    if not media:
-        raise HTTPException(404)
+    msg = await tg.get_messages(CHANNEL_USERNAME, message_id)
+
+    media = msg.video or msg.document
 
     file_size = media.file_size
 
-    range_header = request.headers.get("range")
+    mime_type = mimetypes.guess_type(movie["file_name"])[0] or "video/mp4"
+
+    range_header = request.headers.get("range", None)
 
     start = 0
     end = file_size - 1
 
     if range_header:
 
-        match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        match = re.search(r"bytes=(\d+)-(\d*)", range_header)
 
         if match:
 
@@ -439,39 +290,65 @@ async def proxy(movie_id: str, request: Request):
 
     chunk_size = end - start + 1
 
-    async def file_stream():
+    async def streamer():
 
-        downloaded = 0
+        offset = start
 
-        async for chunk in tg.stream_media(
-            message,
-            offset=start
-        ):
+        while offset <= end:
 
-            if downloaded + len(chunk) > chunk_size:
+            limit = min(1024 * 1024, end - offset + 1)
 
-                remain = chunk_size - downloaded
+            chunk = await tg.stream_media(
+                message=msg,
+                offset=offset,
+                limit=limit
+            )
 
-                yield chunk[:remain]
-
+            if not chunk:
                 break
 
             yield chunk
 
-            downloaded += len(chunk)
-
-            if downloaded >= chunk_size:
-                break
+            offset += len(chunk)
 
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_size),
-        "Content-Type": "video/mp4"
+        "Content-Type": mime_type
     }
 
     return StreamingResponse(
-        file_stream(),
-        status_code=206 if range_header else 200,
+        streamer(),
+        status_code=206,
         headers=headers
     )
+
+# =========================================================
+# MANIFEST
+# =========================================================
+
+@app.get("/manifest.json")
+async def manifest():
+
+    return {
+        "id": "org.arun.telegram",
+        "version": "1.0.0",
+        "name": "Telegram Stream Addon",
+        "description": "Telegram streaming addon",
+        "resources": [
+            "catalog",
+            "meta",
+            "stream"
+        ],
+        "types": [
+            "movie"
+        ],
+        "catalogs": [
+            {
+                "type": "movie",
+                "id": "telegrammovies",
+                "name": "Telegram Movies"
+            }
+        ]
+    }
