@@ -450,46 +450,15 @@ async def stream(id: str):
         "Unknown Movie"
     )
 
-    try:
-
-        msg = await get_message(
-            clean_id,
-            movie["message_id"]
-        )
-
-        cdn_url = await get_cdn_url(
-            clean_id,
-            msg
-        )
-
-        return JSONResponse({
-            "streams": [
-                {
-                    "name": "⚡ Telegram CDN",
-                    "title": movie_name,
-                    "url": cdn_url
-                }
-            ]
-        })
-
-    except Exception as e:
-
-        print(
-            f"❌ Stream URL Error: {e}"
-        )
-
-        return JSONResponse({
-            "streams": [
-                {
-                    "name": "☁️ Telegram Proxy",
-                    "title": movie_name,
-                    "url": (
-                        f"{BASE_URL}/proxy/"
-                        f"{clean_id}"
-                    )
-                }
-            ]
-        })
+    return JSONResponse({
+        "streams": [
+            {
+                "name": "⚡ Telegram CDN",
+                "title": movie_name,
+                "url": f"{BASE_URL}/proxy/{clean_id}"
+            }
+        ]
+    })
 
 # ---------------------------------------------------
 # WATCH REDIRECT
@@ -636,19 +605,23 @@ async def proxy_stream(
 
             async for chunk in tg.stream_media(
                 msg,
-                offset=start,
-                limit=content_length
+                offset=start
             ):
 
                 if not chunk:
                     break
 
+                remaining = content_length - downloaded
+
+                if remaining <= 0:
+                    break
+
+                if len(chunk) > remaining:
+                    chunk = chunk[:remaining]
+
                 downloaded += len(chunk)
 
                 yield chunk
-
-                if downloaded >= content_length:
-                    break
 
         except FloodWait as e:
 
@@ -665,9 +638,8 @@ async def proxy_stream(
         "Accept-Ranges": "bytes",
         "Content-Type": content_type,
         "Content-Length": str(content_length),
-        "Content-Range": (
-            f"bytes {start}-{end}/{file_size}"
-        ),
+        "Content-Range":
+            f"bytes {start}-{end}/{file_size}",
         "Cache-Control": "public, max-age=3600",
         "Connection": "keep-alive",
         "Access-Control-Expose-Headers":
