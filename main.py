@@ -190,31 +190,6 @@ async def add_movie(message: Message):
 
 
 # ---------------------------------------------------
-# FULL SYNC
-# ---------------------------------------------------
-
-async def full_sync():
-
-    print("🔄 Full sync started")
-
-    try:
-
-        async for message in tg.get_chat_history(CHANNEL_USERNAME):
-
-            try:
-                await add_movie(message)
-
-            except Exception as e:
-                print("SYNC ITEM ERROR:", e)
-
-        print("✅ Full sync completed")
-
-    except Exception as e:
-
-        print("FULL SYNC ERROR:", e)
-
-
-# ---------------------------------------------------
 # AUTO NEW FILE SYNC
 # ---------------------------------------------------
 
@@ -253,8 +228,6 @@ async def startup():
 
         print(f"✅ Connected Channel: {chat.title}")
         print(f"✅ Channel Username: {CHANNEL_USERNAME}")
-
-        asyncio.create_task(full_sync())
 
     except Exception as e:
 
@@ -305,20 +278,6 @@ async def reset():
 
     return {
         "status": "reset completed"
-    }
-
-
-# ---------------------------------------------------
-# MANUAL SYNC
-# ---------------------------------------------------
-
-@app.get("/sync")
-async def sync():
-
-    asyncio.create_task(full_sync())
-
-    return {
-        "status": "sync started"
     }
 
 
