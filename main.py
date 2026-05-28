@@ -42,7 +42,7 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    no_updates=True,
+    no_updates=False,
     workers=8
 )
 
@@ -235,6 +235,118 @@ async def get_cdn_url(
 
 
 # ---------------------------------------------------
+# AUTO SYNC NEW FILES
+# ---------------------------------------------------
+@tg.on_message()
+async def auto_sync(_, msg: Message):
+
+    try:
+
+        if not msg.chat:
+            return
+
+        # Only target channel
+        if (
+            str(msg.chat.username).lower()
+            != str(CHANNEL_USERNAME).replace("@", "").lower()
+        ):
+            return
+
+        media = msg.video or msg.document
+
+        if not media:
+            return
+
+        filename = getattr(media, "file_name", None)
+
+        if not filename:
+            return
+
+        movies = load_movies()
+
+        movie_id = (
+            filename
+            .replace(" ", "_")
+            .replace(".", "_")
+            .lower()
+        )
+
+        # -----------------------------------
+        # FILE SIZE
+        # -----------------------------------
+        file_size_bytes = media.file_size or 0
+
+        readable_size = human_size(file_size_bytes)
+
+        # -----------------------------------
+        # QUALITY
+        # -----------------------------------
+        quality = detect_quality(filename)
+
+        # -----------------------------------
+        # RESOLUTION
+        # -----------------------------------
+        resolution = detect_resolution(quality)
+
+        # -----------------------------------
+        # SAVE MOVIE
+        # -----------------------------------
+        movies[movie_id] = {
+            "message_id": msg.id,
+            "file_name": filename,
+            "file_size": file_size_bytes,
+            "readable_size": readable_size,
+            "quality": quality,
+            "resolution": resolution
+        }
+
+        save_movies(movies)
+
+        # Cache message
+        MESSAGES_CACHE[movie_id] = msg
+
+        print(f"✅ Auto Synced: {filename}")
+
+    except Exception as e:
+
+        print(f"❌ Auto Sync Error: {e}")
+
+
+# ---------------------------------------------------
+# AUTO REMOVE DELETED FILES
+# ---------------------------------------------------
+@tg.on_deleted_messages()
+async def auto_remove(_, deleted_messages):
+
+    try:
+
+        movies = load_movies()
+
+        removed = []
+
+        for movie_id, movie in list(movies.items()):
+
+            if movie.get("message_id") in deleted_messages.messages:
+
+                removed.append(movie.get("file_name"))
+
+                movies.pop(movie_id, None)
+
+                MESSAGES_CACHE.pop(movie_id, None)
+                URL_CACHE.pop(movie_id, None)
+
+        if removed:
+
+            save_movies(movies)
+
+            print(f"🗑 Removed {len(removed)} deleted files")
+
+    except Exception as e:
+
+        print(f"❌ Delete Sync Error: {e}")
+
+
+# ---------------------------------------------------
 # STARTUP
 # ---------------------------------------------------
 @app.on_event("startup")
@@ -312,97 +424,11 @@ async def reset():
 
 
 # ---------------------------------------------------
-# SYNC CHANNEL
-# ---------------------------------------------------
-@app.get("/sync")
-async def sync_movies():
-
-    global MESSAGES_CACHE
-
-    try:
-
-        current = {}
-
-        chat = await tg.get_chat(CHANNEL_USERNAME)
-
-        print("✅ Channel:", chat.title)
-
-        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
-
-            try:
-
-                media = msg.video or msg.document
-
-                if not media:
-                    continue
-
-                filename = getattr(media, "file_name", None)
-
-                if not filename:
-                    continue
-
-                movie_id = (
-                    filename
-                    .replace(" ", "_")
-                    .replace(".", "_")
-                    .lower()
-                )
-
-                # -----------------------------------
-                # FILE SIZE
-                # -----------------------------------
-                file_size_bytes = media.file_size or 0
-
-                readable_size = human_size(file_size_bytes)
-
-                # -----------------------------------
-                # QUALITY FROM FILE NAME
-                # -----------------------------------
-                quality = detect_quality(filename)
-
-                # -----------------------------------
-                # RESOLUTION
-                # -----------------------------------
-                resolution = detect_resolution(quality)
-
-                current[movie_id] = {
-                    "message_id": msg.id,
-                    "file_name": filename,
-                    "file_size": file_size_bytes,
-                    "readable_size": readable_size,
-                    "quality": quality,
-                    "resolution": resolution
-                }
-
-                # Cache message
-                MESSAGES_CACHE[movie_id] = msg
-
-            except Exception as inner_error:
-
-                print("Skipped Message:", inner_error)
-
-                continue
-
-        save_movies(current)
-
-        return {
-            "synced": len(current),
-            "messages_cached": len(MESSAGES_CACHE)
-        }
-
-    except Exception as e:
-
-        return {
-            "error": str(e)
-        }
-
-
-# ---------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "18.0.0",
+    "version": "19.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
@@ -801,3 +827,19 @@ async def proxy_stream(movie_id: str, request: Request):
         status_code=206,
         headers=headers
     )
+
+
+# ---------------------------------------------------
+# DUMMY TELEGRAM WEBHOOK
+# ---------------------------------------------------
+@app.post("/telegram-webhook")
+async def telegram_webhook():
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------
+# FAVICON
+# ---------------------------------------------------
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
