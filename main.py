@@ -347,17 +347,19 @@ async def auto_remove(_, deleted_messages):
 @app.on_event("startup")
 async def startup():
 
-    await tg.start()
-
     try:
 
-        await tg.get_chat(CHANNEL_USERNAME)
+        if not tg.is_connected:
 
-        print("✅ Pyrogram started + DC warmed up")
+            await tg.start()
+
+            await tg.get_chat(CHANNEL_USERNAME)
+
+            print("✅ Pyrogram started + DC warmed up")
 
     except Exception as e:
 
-        print(f"⚠️ Warm-up warning: {e}")
+        print(f"⚠️ Startup warning: {e}")
 
 
 # ---------------------------------------------------
@@ -366,9 +368,21 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
 
-    await tg.stop()
+    try:
 
-    print("🛑 Pyrogram stopped")
+        if tg.is_connected:
+
+            await tg.stop()
+
+            print("🛑 Pyrogram stopped")
+
+    except RuntimeError as e:
+
+        print(f"⚠️ Shutdown loop warning: {e}")
+
+    except Exception as e:
+
+        print(f"⚠️ Shutdown error: {e}")
 
 
 # ---------------------------------------------------
@@ -423,7 +437,7 @@ async def reset():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "20.0.0",
+    "version": "21.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
