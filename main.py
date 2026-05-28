@@ -118,7 +118,7 @@ def save_movies(data):
 # =========================================================
 # SYNC LATEST MOVIES
 # =========================================================
-async def sync_latest_movies(limit=20):
+async def sync_latest_movies(limit=5):
 
     global MESSAGES_CACHE
 
@@ -244,18 +244,6 @@ async def get_cdn_url(
     if cached and time.time() < cached["expires"]:
         return cached["url"]
 
-    media = (
-        msg.video
-        or msg.document
-        or msg.animation
-        or msg.audio
-        or msg.voice
-        or msg.video_note
-    )
-
-    if not media:
-        raise Exception("Media not found")
-
     url = f"{BASE_URL}/proxy/{movie_id}"
 
     URL_CACHE[movie_id] = {
@@ -341,35 +329,6 @@ async def test():
         }
 
 # =========================================================
-# DEBUG
-# =========================================================
-@app.get("/debug")
-async def debug():
-
-    results = []
-
-    chat = await tg.get_chat(CHANNEL_USERNAME)
-
-    async for msg in tg.get_chat_history(
-        chat.id,
-        limit=20
-    ):
-
-        results.append({
-            "id": msg.id,
-            "text": msg.text,
-            "video": bool(msg.video),
-            "document": bool(msg.document),
-            "animation": bool(msg.animation),
-            "photo": bool(msg.photo),
-            "audio": bool(msg.audio),
-            "voice": bool(msg.voice),
-            "video_note": bool(msg.video_note),
-        })
-
-    return results
-
-# =========================================================
 # RESET
 # =========================================================
 @app.get("/reset")
@@ -403,7 +362,7 @@ async def reset():
 # =========================================================
 manifest = {
     "id": "org.arun.telegram",
-    "version": "21.0.0",
+    "version": "22.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
     "resources": [
@@ -436,7 +395,7 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
 
-    # Auto sync when Stremio opens catalog
+    # Sync only when catalog opens
     await sync_latest_movies()
 
     movies = load_movies()
@@ -469,9 +428,6 @@ async def catalog():
 # =========================================================
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
-
-    # Auto sync when Stremio opens meta
-    await sync_latest_movies()
 
     clean_id = id.replace("tg:", "")
 
@@ -506,9 +462,6 @@ async def meta(id: str):
 # =========================================================
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
-
-    # Auto sync when Stremio opens stream
-    await sync_latest_movies()
 
     clean_id = id.replace("tg:", "")
 
