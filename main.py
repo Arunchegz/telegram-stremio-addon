@@ -18,7 +18,6 @@ from pyrogram.errors import FloodWait
 
 import os
 import json
-import asyncio
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -40,8 +39,7 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    no_updates=True,
-    workers=8
+    no_updates=True
 )
 
 # ---------------------------------------------------
@@ -247,9 +245,9 @@ async def sync_movies():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "15.0.0",
+    "version": "14.0.0",
     "name": "Telegram Movies",
-    "description": "Fast Telegram Seekable Streaming",
+    "description": "Telegram Seekable Streaming",
     "resources": [
         "catalog",
         "meta",
@@ -384,7 +382,7 @@ async def stream(id: str):
     })
 
 # ---------------------------------------------------
-# WATCH / FAST SEEKABLE STREAM
+# WATCH / SEEKABLE STREAM
 # ---------------------------------------------------
 @app.api_route(
     "/watch/{movie_id}",
@@ -503,9 +501,9 @@ async def watch(
         end = file_size - 1
 
     # ---------------------------------------------------
-    # FASTER TELEGRAM CHUNKS
+    # STREAM SETTINGS
     # ---------------------------------------------------
-    chunk_size = 2 * 1024 * 1024
+    chunk_size = 1024 * 1024
 
     # ---------------------------------------------------
     # STREAM GENERATOR
@@ -523,7 +521,7 @@ async def watch(
                 offset=start // chunk_size
             ):
 
-                # First chunk trim
+                # Trim first chunk
                 if first_chunk:
 
                     skip = start % chunk_size
@@ -570,9 +568,7 @@ async def watch(
         "Content-Range": (
             f"bytes {start}-{end}/{file_size}"
         ),
-        "Content-Type": content_type,
-        "Cache-Control": "public, max-age=3600",
-        "Connection": "keep-alive"
+        "Content-Type": content_type
     }
 
     # ---------------------------------------------------
