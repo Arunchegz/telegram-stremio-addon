@@ -13,11 +13,7 @@ from fastapi.responses import (
 
 from fastapi.middleware.cors import CORSMiddleware
 
-from pyrogram import (
-    Client,
-    filters
-)
-
+from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
@@ -46,8 +42,8 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    no_updates=False,
-    workers=8
+    no_updates=True,
+    workers=0
 )
 
 # ---------------------------------------------------
@@ -185,6 +181,80 @@ def save_movies(data):
 
 
 # ---------------------------------------------------
+# BACKGROUND AUTO SYNC
+# ---------------------------------------------------
+async def background_sync():
+
+    while True:
+
+        try:
+
+            movies = load_movies()
+
+            updated = False
+
+            async for msg in tg.get_chat_history(
+                CHANNEL_USERNAME,
+                limit=50
+            ):
+
+                media = msg.video or msg.document
+
+                if not media:
+                    continue
+
+                filename = getattr(media, "file_name", None)
+
+                if not filename:
+                    continue
+
+                movie_id = (
+                    filename
+                    .replace(" ", "_")
+                    .replace(".", "_")
+                    .lower()
+                )
+
+                # Skip existing movies
+                if movie_id in movies:
+                    continue
+
+                file_size_bytes = media.file_size or 0
+
+                readable_size = human_size(file_size_bytes)
+
+                quality = detect_quality(filename)
+
+                resolution = detect_resolution(quality)
+
+                movies[movie_id] = {
+                    "message_id": msg.id,
+                    "file_name": filename,
+                    "file_size": file_size_bytes,
+                    "readable_size": readable_size,
+                    "quality": quality,
+                    "resolution": resolution
+                }
+
+                MESSAGES_CACHE[movie_id] = msg
+
+                updated = True
+
+                print(f"✅ Auto Synced: {filename}")
+
+            # Save only if changed
+            if updated:
+                save_movies(movies)
+
+        except Exception as e:
+
+            print(f"⚠️ Background Sync Error: {e}")
+
+        # Sync every 30 sec
+        await asyncio.sleep(30)
+
+
+# ---------------------------------------------------
 # GET MESSAGE
 # ---------------------------------------------------
 async def get_message(
@@ -240,108 +310,6 @@ async def get_cdn_url(
 
 
 # ---------------------------------------------------
-# AUTO SYNC NEW FILES
-# ---------------------------------------------------
-@tg.on_message(filters.chat(CHANNEL_USERNAME))
-async def auto_sync(_, msg: Message):
-
-    try:
-
-        media = msg.video or msg.document
-
-        if not media:
-            return
-
-        filename = getattr(media, "file_name", None)
-
-        if not filename:
-            return
-
-        movies = load_movies()
-
-        movie_id = (
-            filename
-            .replace(" ", "_")
-            .replace(".", "_")
-            .lower()
-        )
-
-        # -----------------------------------
-        # FILE SIZE
-        # -----------------------------------
-        file_size_bytes = media.file_size or 0
-
-        readable_size = human_size(file_size_bytes)
-
-        # -----------------------------------
-        # QUALITY
-        # -----------------------------------
-        quality = detect_quality(filename)
-
-        # -----------------------------------
-        # RESOLUTION
-        # -----------------------------------
-        resolution = detect_resolution(quality)
-
-        # -----------------------------------
-        # SAVE MOVIE
-        # -----------------------------------
-        movies[movie_id] = {
-            "message_id": msg.id,
-            "file_name": filename,
-            "file_size": file_size_bytes,
-            "readable_size": readable_size,
-            "quality": quality,
-            "resolution": resolution
-        }
-
-        save_movies(movies)
-
-        # Cache message
-        MESSAGES_CACHE[movie_id] = msg
-
-        print(f"✅ Auto Synced: {filename}")
-
-    except Exception as e:
-
-        print(f"❌ Auto Sync Error: {e}")
-
-
-# ---------------------------------------------------
-# AUTO REMOVE DELETED FILES
-# ---------------------------------------------------
-@tg.on_deleted_messages()
-async def auto_remove(_, deleted_messages):
-
-    try:
-
-        movies = load_movies()
-
-        removed = []
-
-        for movie_id, movie in list(movies.items()):
-
-            if movie.get("message_id") in deleted_messages.messages:
-
-                removed.append(movie.get("file_name"))
-
-                movies.pop(movie_id, None)
-
-                MESSAGES_CACHE.pop(movie_id, None)
-                URL_CACHE.pop(movie_id, None)
-
-        if removed:
-
-            save_movies(movies)
-
-            print(f"🗑 Removed {len(removed)} deleted files")
-
-    except Exception as e:
-
-        print(f"❌ Delete Sync Error: {e}")
-
-
-# ---------------------------------------------------
 # STARTUP
 # ---------------------------------------------------
 @app.on_event("startup")
@@ -355,34 +323,13 @@ async def startup():
 
             await tg.get_chat(CHANNEL_USERNAME)
 
+            asyncio.create_task(background_sync())
+
             print("✅ Pyrogram started + DC warmed up")
 
     except Exception as e:
 
         print(f"⚠️ Startup warning: {e}")
-
-
-# ---------------------------------------------------
-# SHUTDOWN
-# ---------------------------------------------------
-@app.on_event("shutdown")
-async def shutdown():
-
-    try:
-
-        if tg.is_connected:
-
-            await tg.stop()
-
-            print("🛑 Pyrogram stopped")
-
-    except RuntimeError as e:
-
-        print(f"⚠️ Shutdown loop warning: {e}")
-
-    except Exception as e:
-
-        print(f"⚠️ Shutdown error: {e}")
 
 
 # ---------------------------------------------------
@@ -437,7 +384,7 @@ async def reset():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "21.0.0",
+    "version": "23.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
@@ -817,8 +764,9 @@ async def proxy_stream(movie_id: str, request: Request):
 
                 print(f"\n🚨 FloodWait: {e.value}s\n")
 
-            except Exception:
-                pass
+            except Exception as e:
+
+                print(f"⚠️ Stream Error: {e}")
 
     # ---------------------------------------------------
     # HEADERS
