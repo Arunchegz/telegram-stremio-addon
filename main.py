@@ -32,7 +32,8 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    workers=4
+    workers=4,
+    no_updates=True
 )
 
 # ---------------------------------------------------
@@ -56,10 +57,13 @@ def load_movies():
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "r") as f:
                 return json.load(f)
+
         return {}
+
     except Exception as e:
         print(f"DB Load Error: {e}")
         return {}
+
 
 def save_movies(data):
     try:
@@ -71,6 +75,7 @@ def save_movies(data):
     except Exception as e:
         print(f"DB Save Error: {e}")
 
+
 # ---------------------------------------------------
 # STARTUP
 # ---------------------------------------------------
@@ -79,6 +84,7 @@ async def startup():
     await tg.start()
     print("✅ Pyrogram started")
 
+
 # ---------------------------------------------------
 # SHUTDOWN
 # ---------------------------------------------------
@@ -86,6 +92,7 @@ async def startup():
 async def shutdown():
     await tg.stop()
     print("🛑 Pyrogram stopped")
+
 
 # ---------------------------------------------------
 # RESET DATABASE
@@ -101,16 +108,19 @@ async def reset():
     except Exception as e:
         return {"error": str(e)}
 
+
 # ---------------------------------------------------
 # SYNC TELEGRAM CHANNEL
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
+
     try:
         current = {}
 
-        # Resolve channel
+        # Resolve channel once
         chat = await tg.get_chat(CHANNEL_USERNAME)
+
         print("✅ Resolved Chat:", chat.title)
 
         async for msg in tg.get_chat_history(CHANNEL_USERNAME):
@@ -155,12 +165,13 @@ async def sync_movies():
     except Exception as e:
         return {"error": str(e)}
 
+
 # ---------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "7.0.0",
+    "version": "8.0.0",
     "name": "Telegram Stream Addon",
     "description": "Telegram Seekable Streaming Addon",
     "resources": [
@@ -183,9 +194,11 @@ manifest = {
     ]
 }
 
+
 @app.get("/manifest.json")
 async def get_manifest():
     return JSONResponse(manifest)
+
 
 # ---------------------------------------------------
 # CATALOG
@@ -212,6 +225,7 @@ async def catalog():
         })
 
     return JSONResponse({"metas": metas})
+
 
 # ---------------------------------------------------
 # META
@@ -242,6 +256,7 @@ async def meta(id: str):
         }
     })
 
+
 # ---------------------------------------------------
 # STREAM
 # ---------------------------------------------------
@@ -269,6 +284,7 @@ async def stream(id: str):
         ]
     })
 
+
 # ---------------------------------------------------
 # WATCH / SEEKABLE STREAM
 # ---------------------------------------------------
@@ -290,10 +306,7 @@ async def watch(movie_id: str, request: Request):
 
     message_id = movie["message_id"]
 
-    # Resolve chat
-    await tg.get_chat(CHANNEL_USERNAME)
-
-    # Get message
+    # GET TELEGRAM MESSAGE
     msg: Message = await tg.get_messages(
         CHANNEL_USERNAME,
         message_id
@@ -321,6 +334,20 @@ async def watch(movie_id: str, request: Request):
 
     elif filename.endswith(".webm"):
         content_type = "video/webm"
+
+    # ---------------------------------------------------
+    # HEAD REQUEST
+    # ---------------------------------------------------
+    if request.method == "HEAD":
+
+        return Response(
+            status_code=200,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Type": content_type
+            }
+        )
 
     # ---------------------------------------------------
     # RANGE PARSING
@@ -372,21 +399,9 @@ async def watch(movie_id: str, request: Request):
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Content-Length": str(content_length),
         "Content-Type": content_type,
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
+        "Cache-Control": "no-cache"
     }
-
-    # ---------------------------------------------------
-    # HANDLE HEAD REQUEST
-    # ---------------------------------------------------
-    if request.method == "HEAD":
-
-        return Response(
-            status_code=206,
-            headers=headers
-        )
 
     # ---------------------------------------------------
     # TELEGRAM CHUNK SETTINGS
@@ -413,7 +428,7 @@ async def watch(movie_id: str, request: Request):
                 offset=chunk_index
             ):
 
-                # First chunk trim
+                # Trim first chunk
                 if first_chunk:
                     chunk = chunk[skip_bytes:]
                     first_chunk = False
@@ -423,7 +438,7 @@ async def watch(movie_id: str, request: Request):
                 if remaining <= 0:
                     break
 
-                # Trim extra bytes
+                # Prevent extra bytes
                 if len(chunk) > remaining:
                     chunk = chunk[:remaining]
 
@@ -435,26 +450,29 @@ async def watch(movie_id: str, request: Request):
 
             print(
                 f"\n🚨 FLOOD_WAIT: "
-                f"Wait {e.value} seconds\n"
+                f"{e.value} seconds\n"
             )
 
             return
 
         except Exception as e:
 
-            print("Stream Error:", str(e))
+            print(
+                f"\n❌ Stream Error: "
+                f"{str(e)}\n"
+            )
 
             return
 
     # ---------------------------------------------------
-    # STREAMING RESPONSE
+    # STREAM RESPONSE
     # ---------------------------------------------------
     return StreamingResponse(
         file_stream(),
         status_code=206,
-        headers=headers,
-        media_type=content_type
+        headers=headers
     )
+
 
 # ---------------------------------------------------
 # HOME
