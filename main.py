@@ -43,7 +43,7 @@ tg = Client(
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     no_updates=True,
-    workers=0
+    workers=1
 )
 
 # ---------------------------------------------------
@@ -66,11 +66,13 @@ MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# Prevent Telegram FloodWait
+# ---------------------------------------------------
+# STREAM LIMITER
+# ---------------------------------------------------
 STREAM_LIMITER = asyncio.Semaphore(2)
 
 # ---------------------------------------------------
-# URL TTL
+# URL CACHE TTL
 # ---------------------------------------------------
 URL_TTL = 3000
 
@@ -94,24 +96,24 @@ def human_size(size):
 
 def detect_quality(filename: str):
 
-    lower_name = filename.lower()
+    name = filename.lower()
 
-    if "2160p" in lower_name or "4k" in lower_name:
+    if "2160p" in name or "4k" in name:
         return "4K"
 
-    elif "1440p" in lower_name:
+    elif "1440p" in name:
         return "1440p"
 
-    elif "1080p" in lower_name:
+    elif "1080p" in name:
         return "1080p"
 
-    elif "720p" in lower_name:
+    elif "720p" in name:
         return "720p"
 
-    elif "480p" in lower_name:
+    elif "480p" in name:
         return "480p"
 
-    elif "360p" in lower_name:
+    elif "360p" in name:
         return "360p"
 
     return "Unknown"
@@ -132,7 +134,7 @@ def detect_resolution(quality: str):
 
 
 # ---------------------------------------------------
-# DATABASE FUNCTIONS
+# DATABASE
 # ---------------------------------------------------
 def load_movies():
 
@@ -215,7 +217,7 @@ async def background_sync():
                     .lower()
                 )
 
-                # Skip existing movies
+                # Skip already synced
                 if movie_id in movies:
                     continue
 
@@ -242,7 +244,6 @@ async def background_sync():
 
                 print(f"✅ Auto Synced: {filename}")
 
-            # Save only if changed
             if updated:
                 save_movies(movies)
 
@@ -250,7 +251,6 @@ async def background_sync():
 
             print(f"⚠️ Background Sync Error: {e}")
 
-        # Sync every 30 sec
         await asyncio.sleep(30)
 
 
@@ -277,7 +277,7 @@ async def get_message(
 
 
 # ---------------------------------------------------
-# GET CDN URL
+# GET STREAM URL
 # ---------------------------------------------------
 async def get_cdn_url(
     movie_id: str,
@@ -291,11 +291,6 @@ async def get_cdn_url(
         print(f"✅ URL Cache Hit: {movie_id}")
 
         return cached["url"]
-
-    media = msg.video or msg.document
-
-    if not media:
-        raise Exception("Media not found")
 
     url = f"{BASE_URL}/proxy/{movie_id}"
 
@@ -329,7 +324,7 @@ async def startup():
 
     except Exception as e:
 
-        print(f"⚠️ Startup warning: {e}")
+        print(f"⚠️ Startup Error: {e}")
 
 
 # ---------------------------------------------------
@@ -350,7 +345,7 @@ async def home():
 
 
 # ---------------------------------------------------
-# RESET
+# RESET DATABASE
 # ---------------------------------------------------
 @app.get("/reset")
 async def reset():
@@ -384,7 +379,7 @@ async def reset():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "23.0.0",
+    "version": "24.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
@@ -417,36 +412,16 @@ async def catalog():
 
     for movie_id, movie in movies.items():
 
-        movie_name = movie.get(
-            "file_name",
-            "Unknown Movie"
-        )
-
-        quality = movie.get(
-            "quality",
-            "Unknown"
-        )
-
-        resolution = movie.get(
-            "resolution",
-            "Unknown"
-        )
-
-        size = movie.get(
-            "readable_size",
-            "Unknown"
-        )
-
         metas.append({
             "id": f"tg:{movie_id}",
             "type": "movie",
-            "name": movie_name,
+            "name": movie["file_name"],
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
             "description": (
-                f"📺 {quality} | "
-                f"🖥 {resolution} | "
-                f"💾 {size}"
+                f"📺 {movie['quality']} | "
+                f"🖥 {movie['resolution']} | "
+                f"💾 {movie['readable_size']}"
             ),
             "posterShape": "poster"
         })
@@ -471,37 +446,17 @@ async def meta(id: str):
     if not movie:
         return JSONResponse({"meta": {}})
 
-    movie_name = movie.get(
-        "file_name",
-        "Unknown Movie"
-    )
-
-    quality = movie.get(
-        "quality",
-        "Unknown"
-    )
-
-    resolution = movie.get(
-        "resolution",
-        "Unknown"
-    )
-
-    size = movie.get(
-        "readable_size",
-        "Unknown"
-    )
-
     return JSONResponse({
         "meta": {
             "id": id,
             "type": "movie",
-            "name": movie_name,
+            "name": movie["file_name"],
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
             "description": (
-                f"📺 Quality: {quality}\n"
-                f"🖥 Resolution: {resolution}\n"
-                f"💾 Size: {size}"
+                f"📺 Quality: {movie['quality']}\n"
+                f"🖥 Resolution: {movie['resolution']}\n"
+                f"💾 Size: {movie['readable_size']}"
             ),
             "posterShape": "poster"
         }
@@ -523,68 +478,30 @@ async def stream(id: str):
     if not movie:
         return JSONResponse({"streams": []})
 
-    movie_name = movie.get(
-        "file_name",
-        "Unknown Movie"
+    msg = await get_message(
+        clean_id,
+        movie["message_id"]
     )
 
-    quality = movie.get(
-        "quality",
-        "Unknown"
+    url = await get_cdn_url(
+        clean_id,
+        msg
     )
 
-    resolution = movie.get(
-        "resolution",
-        "Unknown"
-    )
-
-    size = movie.get(
-        "readable_size",
-        "Unknown"
-    )
-
-    stream_title = (
-        f"{movie_name}\n"
-        f"📺 {quality} | "
-        f"🖥 {resolution} | "
-        f"💾 {size}"
-    )
-
-    try:
-
-        msg = await get_message(
-            clean_id,
-            movie["message_id"]
-        )
-
-        cdn_url = await get_cdn_url(
-            clean_id,
-            msg
-        )
-
-        return JSONResponse({
-            "streams": [
-                {
-                    "name": "⚡ Telegram CDN",
-                    "title": stream_title,
-                    "url": cdn_url
-                }
-            ]
-        })
-
-    except Exception as e:
-
-        print(f"❌ Stream URL Error: {e}")
-
-        return JSONResponse({
-            "streams": [
-                {
-                    "name": "☁️ Telegram Proxy",
-                    "title": stream_title,
-                    "url": f"{BASE_URL}/proxy/{clean_id}"
-                }
-            ]
-        })
+    return JSONResponse({
+        "streams": [
+            {
+                "name": "⚡ Telegram Stream",
+                "title": (
+                    f"{movie['file_name']}\n"
+                    f"📺 {movie['quality']} | "
+                    f"🖥 {movie['resolution']} | "
+                    f"💾 {movie['readable_size']}"
+                ),
+                "url": url
+            }
+        ]
+    })
 
 
 # ---------------------------------------------------
@@ -596,19 +513,17 @@ async def stream(id: str):
 )
 async def watch(movie_id: str, request: Request):
 
-    cdn_url = f"{BASE_URL}/proxy/{movie_id}"
+    url = f"{BASE_URL}/proxy/{movie_id}"
 
     if request.method == "HEAD":
 
         return Response(
             status_code=200,
-            headers={
-                "Location": cdn_url
-            }
+            headers={"Location": url}
         )
 
     return RedirectResponse(
-        url=cdn_url,
+        url=url,
         status_code=302
     )
 
@@ -645,19 +560,10 @@ async def proxy_stream(movie_id: str, request: Request):
             detail="Media not found"
         )
 
-    file_size = movie.get(
-        "file_size",
-        media.file_size
-    )
+    file_size = media.file_size
 
-    filename = movie.get(
-        "file_name",
-        "video.mkv"
-    ).lower()
+    filename = movie["file_name"].lower()
 
-    # ---------------------------------------------------
-    # CONTENT TYPE
-    # ---------------------------------------------------
     content_type = "video/mp4"
 
     if filename.endswith(".mkv"):
@@ -684,7 +590,7 @@ async def proxy_stream(movie_id: str, request: Request):
         )
 
     # ---------------------------------------------------
-    # RANGE PARSING
+    # RANGE
     # ---------------------------------------------------
     range_header = request.headers.get("range")
 
@@ -714,7 +620,7 @@ async def proxy_stream(movie_id: str, request: Request):
         end = file_size - 1
 
     # ---------------------------------------------------
-    # TELEGRAM CHUNK SIZE
+    # CHUNK SIZE
     # ---------------------------------------------------
     TG_CHUNK_SIZE = 1024 * 1024
 
@@ -762,15 +668,12 @@ async def proxy_stream(movie_id: str, request: Request):
 
             except FloodWait as e:
 
-                print(f"\n🚨 FloodWait: {e.value}s\n")
+                print(f"🚨 FloodWait: {e.value}s")
 
             except Exception as e:
 
                 print(f"⚠️ Stream Error: {e}")
 
-    # ---------------------------------------------------
-    # HEADERS
-    # ---------------------------------------------------
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {start}-{end}/{file_size}",
@@ -787,7 +690,7 @@ async def proxy_stream(movie_id: str, request: Request):
 
 
 # ---------------------------------------------------
-# DUMMY TELEGRAM WEBHOOK
+# TELEGRAM WEBHOOK
 # ---------------------------------------------------
 @app.post("/telegram-webhook")
 async def telegram_webhook():
