@@ -60,13 +60,13 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
-# MEMORY CACHE & LIMITS
+# MEMORY CACHE
 # ---------------------------------------------------
 MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# Prevents Telegram FloodWait
+# Prevent Telegram FloodWait
 STREAM_LIMITER = asyncio.Semaphore(2)
 
 # ---------------------------------------------------
@@ -75,7 +75,7 @@ STREAM_LIMITER = asyncio.Semaphore(2)
 URL_TTL = 3000
 
 # ---------------------------------------------------
-# UTILS
+# HELPERS
 # ---------------------------------------------------
 def human_size(size):
 
@@ -83,34 +83,52 @@ def human_size(size):
         return "Unknown"
 
     for unit in ["B", "KB", "MB", "GB", "TB"]:
+
         if size < 1024:
             return f"{size:.2f} {unit}"
+
         size /= 1024
 
     return f"{size:.2f} PB"
 
 
-def detect_quality(height):
+def detect_quality(filename: str):
 
-    if not height:
-        return "Unknown"
+    lower_name = filename.lower()
 
-    if height >= 2160:
+    if "2160p" in lower_name or "4k" in lower_name:
         return "4K"
 
-    elif height >= 1440:
+    elif "1440p" in lower_name:
         return "1440p"
 
-    elif height >= 1080:
+    elif "1080p" in lower_name:
         return "1080p"
 
-    elif height >= 720:
+    elif "720p" in lower_name:
         return "720p"
 
-    elif height >= 480:
+    elif "480p" in lower_name:
         return "480p"
 
-    return f"{height}p"
+    elif "360p" in lower_name:
+        return "360p"
+
+    return "Unknown"
+
+
+def detect_resolution(quality: str):
+
+    mapping = {
+        "4K": "3840x2160",
+        "1440p": "2560x1440",
+        "1080p": "1920x1080",
+        "720p": "1280x720",
+        "480p": "854x480",
+        "360p": "640x360"
+    }
+
+    return mapping.get(quality, "Unknown")
 
 
 # ---------------------------------------------------
@@ -124,6 +142,7 @@ def load_movies():
         return MOVIES_CACHE
 
     try:
+
         if os.path.exists(DB_FILE):
 
             with open(DB_FILE, "r") as f:
@@ -134,6 +153,7 @@ def load_movies():
         return {}
 
     except Exception as e:
+
         print("DB Load Error:", e)
         return {}
 
@@ -143,6 +163,7 @@ def save_movies(data):
     global MOVIES_CACHE
 
     try:
+
         os.makedirs(
             os.path.dirname(DB_FILE),
             exist_ok=True
@@ -154,11 +175,12 @@ def save_movies(data):
         MOVIES_CACHE = data
 
     except Exception as e:
+
         print("DB Save Error:", e)
 
 
 # ---------------------------------------------------
-# GET CACHED MESSAGE
+# GET MESSAGE
 # ---------------------------------------------------
 async def get_message(
     movie_id: str,
@@ -168,6 +190,7 @@ async def get_message(
     msg = MESSAGES_CACHE.get(movie_id)
 
     if not msg:
+
         msg = await tg.get_messages(
             CHANNEL_USERNAME,
             message_id
@@ -188,9 +211,10 @@ async def get_cdn_url(
 
     cached = URL_CACHE.get(movie_id)
 
-    # Cache hit
     if cached and time.time() < cached["expires"]:
+
         print(f"✅ URL Cache Hit: {movie_id}")
+
         return cached["url"]
 
     media = msg.video or msg.document
@@ -219,10 +243,13 @@ async def startup():
     await tg.start()
 
     try:
+
         await tg.get_chat(CHANNEL_USERNAME)
+
         print("✅ Pyrogram started + DC warmed up")
 
     except Exception as e:
+
         print(f"⚠️ Warm-up warning: {e}")
 
 
@@ -233,6 +260,7 @@ async def startup():
 async def shutdown():
 
     await tg.stop()
+
     print("🛑 Pyrogram stopped")
 
 
@@ -277,6 +305,7 @@ async def reset():
         }
 
     except Exception as e:
+
         return {
             "error": str(e)
         }
@@ -320,22 +349,21 @@ async def sync_movies():
                 )
 
                 # -----------------------------------
-                # VIDEO INFO
+                # FILE SIZE
                 # -----------------------------------
-                width = getattr(media, "width", 0)
-                height = getattr(media, "height", 0)
-
-                resolution = (
-                    f"{width}x{height}"
-                    if width and height
-                    else "Unknown"
-                )
-
-                quality = detect_quality(height)
-
                 file_size_bytes = media.file_size or 0
 
                 readable_size = human_size(file_size_bytes)
+
+                # -----------------------------------
+                # QUALITY FROM FILE NAME
+                # -----------------------------------
+                quality = detect_quality(filename)
+
+                # -----------------------------------
+                # RESOLUTION
+                # -----------------------------------
+                resolution = detect_resolution(quality)
 
                 current[movie_id] = {
                     "message_id": msg.id,
@@ -350,7 +378,9 @@ async def sync_movies():
                 MESSAGES_CACHE[movie_id] = msg
 
             except Exception as inner_error:
+
                 print("Skipped Message:", inner_error)
+
                 continue
 
         save_movies(current)
@@ -361,6 +391,7 @@ async def sync_movies():
         }
 
     except Exception as e:
+
         return {
             "error": str(e)
         }
@@ -371,7 +402,7 @@ async def sync_movies():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "17.0.0",
+    "version": "18.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
@@ -404,11 +435,25 @@ async def catalog():
 
     for movie_id, movie in movies.items():
 
-        movie_name = movie.get("file_name", "Unknown Movie")
+        movie_name = movie.get(
+            "file_name",
+            "Unknown Movie"
+        )
 
-        quality = movie.get("quality", "Unknown")
-        resolution = movie.get("resolution", "Unknown")
-        size = movie.get("readable_size", "Unknown")
+        quality = movie.get(
+            "quality",
+            "Unknown"
+        )
+
+        resolution = movie.get(
+            "resolution",
+            "Unknown"
+        )
+
+        size = movie.get(
+            "readable_size",
+            "Unknown"
+        )
 
         metas.append({
             "id": f"tg:{movie_id}",
@@ -444,11 +489,25 @@ async def meta(id: str):
     if not movie:
         return JSONResponse({"meta": {}})
 
-    movie_name = movie.get("file_name", "Unknown Movie")
+    movie_name = movie.get(
+        "file_name",
+        "Unknown Movie"
+    )
 
-    quality = movie.get("quality", "Unknown")
-    resolution = movie.get("resolution", "Unknown")
-    size = movie.get("readable_size", "Unknown")
+    quality = movie.get(
+        "quality",
+        "Unknown"
+    )
+
+    resolution = movie.get(
+        "resolution",
+        "Unknown"
+    )
+
+    size = movie.get(
+        "readable_size",
+        "Unknown"
+    )
 
     return JSONResponse({
         "meta": {
@@ -482,11 +541,25 @@ async def stream(id: str):
     if not movie:
         return JSONResponse({"streams": []})
 
-    movie_name = movie.get("file_name", "Unknown Movie")
+    movie_name = movie.get(
+        "file_name",
+        "Unknown Movie"
+    )
 
-    quality = movie.get("quality", "Unknown")
-    resolution = movie.get("resolution", "Unknown")
-    size = movie.get("readable_size", "Unknown")
+    quality = movie.get(
+        "quality",
+        "Unknown"
+    )
+
+    resolution = movie.get(
+        "resolution",
+        "Unknown"
+    )
+
+    size = movie.get(
+        "readable_size",
+        "Unknown"
+    )
 
     stream_title = (
         f"{movie_name}\n"
@@ -502,7 +575,10 @@ async def stream(id: str):
             movie["message_id"]
         )
 
-        cdn_url = await get_cdn_url(clean_id, msg)
+        cdn_url = await get_cdn_url(
+            clean_id,
+            msg
+        )
 
         return JSONResponse({
             "streams": [
@@ -541,6 +617,7 @@ async def watch(movie_id: str, request: Request):
     cdn_url = f"{BASE_URL}/proxy/{movie_id}"
 
     if request.method == "HEAD":
+
         return Response(
             status_code=200,
             headers={
@@ -679,7 +756,6 @@ async def proxy_stream(movie_id: str, request: Request):
                     offset=chunk_offset
                 ):
 
-                    # Stop instantly if disconnected
                     if await request.is_disconnected():
                         break
 
@@ -703,6 +779,7 @@ async def proxy_stream(movie_id: str, request: Request):
                     yield chunk
 
             except FloodWait as e:
+
                 print(f"\n🚨 FloodWait: {e.value}s\n")
 
             except Exception:
