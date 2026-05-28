@@ -14,15 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client
 from pyrogram.types import Message
-
-from pyrogram.raw.functions.upload import GetFile
-from pyrogram.raw.types import InputDocumentFileLocation
-
 from pyrogram.errors import FloodWait
 
 import os
 import json
-import asyncio
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -60,13 +55,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------
-# GLOBAL CDN CACHE
-# ---------------------------------------------------
-exported_senders = {}
-
-sender_lock = asyncio.Lock()
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
@@ -205,7 +193,8 @@ async def sync_movies():
 
                 current[movie_id] = {
                     "message_id": msg.id,
-                    "file_name": filename
+                    "file_name": filename,
+                    "file_size": media.file_size
                 }
 
             except Exception as inner_error:
@@ -234,7 +223,7 @@ async def sync_movies():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "12.0.0",
+    "version": "13.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
     "resources": [
@@ -391,7 +380,9 @@ async def watch(
 
     message_id = movie["message_id"]
 
-    # GET MESSAGE
+    # ---------------------------------------------------
+    # GET TELEGRAM MESSAGE
+    # ---------------------------------------------------
     msg: Message = await tg.get_messages(
         CHANNEL_USERNAME,
         message_id
@@ -421,7 +412,7 @@ async def watch(
         content_type = "video/webm"
 
     # ---------------------------------------------------
-    # HEAD REQUEST
+    # HEAD SUPPORT
     # ---------------------------------------------------
     if request.method == "HEAD":
 
@@ -444,17 +435,23 @@ async def watch(
 
     if range_header:
 
-        bytes_range = (
-            range_header
-            .replace("bytes=", "")
-            .split("-")
-        )
+        try:
 
-        if bytes_range[0]:
-            start = int(bytes_range[0])
+            bytes_range = (
+                range_header
+                .replace("bytes=", "")
+                .split("-")
+            )
 
-        if len(bytes_range) > 1 and bytes_range[1]:
-            end = int(bytes_range[1])
+            if bytes_range[0]:
+                start = int(bytes_range[0])
+
+            if len(bytes_range) > 1 and bytes_range[1]:
+                end = int(bytes_range[1])
+
+        except Exception as e:
+
+            print("Range Parse Error:", e)
 
     # ---------------------------------------------------
     # RANGE VALIDATION
@@ -470,82 +467,64 @@ async def watch(
         end = file_size - 1
 
     # ---------------------------------------------------
-    # TELEGRAM FILE LOCATION
+    # STREAM SETTINGS
     # ---------------------------------------------------
-    location = InputDocumentFileLocation(
-        id=media.file_id,
-        access_hash=media.access_hash,
-        file_reference=media.file_reference,
-        thumb_size=""
-    )
-
     chunk_size = 1024 * 1024
-
-    # ---------------------------------------------------
-    # EXPORT SENDER CACHE
-    # ---------------------------------------------------
-    async with sender_lock:
-
-        dc_id = media.dc_id
-
-        if dc_id not in exported_senders:
-
-            exported_senders[dc_id] = True
-
-            print(
-                f"✅ Cached sender for DC {dc_id}"
-            )
 
     # ---------------------------------------------------
     # STREAM GENERATOR
     # ---------------------------------------------------
     async def streamer():
 
-        current = start
+        sent = 0
 
-        while current <= end:
+        first_chunk = True
 
-            limit = min(
-                chunk_size,
-                end - current + 1
-            )
+        try:
 
-            try:
+            async for chunk in tg.stream_media(
+                msg,
+                offset=start // chunk_size
+            ):
 
-                result = await tg.invoke(
-                    GetFile(
-                        location=location,
-                        offset=current,
-                        limit=limit
-                    )
+                # Trim first chunk
+                if first_chunk:
+
+                    skip = start % chunk_size
+
+                    chunk = chunk[skip:]
+
+                    first_chunk = False
+
+                remaining = (
+                    (end - start + 1)
+                    - sent
                 )
 
-                chunk = result.bytes
-
-                if not chunk:
+                if remaining <= 0:
                     break
 
-                current += len(chunk)
+                # Prevent extra bytes
+                if len(chunk) > remaining:
+                    chunk = chunk[:remaining]
+
+                sent += len(chunk)
 
                 yield chunk
 
-            except FloodWait as e:
+        except FloodWait as e:
 
-                print(
-                    f"\n🚨 FloodWait:"
-                    f" {e.value}s\n"
-                )
+            print(
+                f"\n🚨 FloodWait:"
+                f" {e.value}s\n"
+            )
 
-                break
+        except Exception as e:
 
-            except Exception as e:
-
-                print(
-                    f"\n❌ Stream Error:"
-                    f" {str(e)}\n"
-                )
-
-                break
+            print(
+                f"\n❌ Stream Error:"
+                f" {str(e)}\n"
+            )
 
     # ---------------------------------------------------
     # RESPONSE HEADERS
