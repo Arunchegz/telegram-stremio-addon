@@ -20,7 +20,6 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 
 BASE_URL = os.getenv("BASE_URL")
 
-# USE USERNAME INSTEAD OF CHANNEL ID
 CHANNEL_USERNAME = os.getenv(
     "CHANNEL_USERNAME"
 )
@@ -126,7 +125,7 @@ async def sync_movies():
 
         current = {}
 
-        # FORCE RESOLVE CHANNEL
+        # FORCE CHANNEL RESOLVE
         chat = await tg.get_chat(
             CHANNEL_USERNAME
         )
@@ -140,38 +139,53 @@ async def sync_movies():
             CHANNEL_USERNAME
         ):
 
-            media = (
-                msg.video or
-                msg.document
-            )
+            try:
 
-            if not media:
+                media = (
+                    msg.video or
+                    msg.document
+                )
+
+                if not media:
+                    continue
+
+                filename = getattr(
+                    media,
+                    "file_name",
+                    None
+                )
+
+                if not filename:
+                    continue
+
+                # SKIP INVALID FILES
+                if media.file_size is None:
+                    continue
+
+                movie_id = (
+                    filename
+                    .replace(" ", "_")
+                    .replace(".", "_")
+                    .lower()
+                )
+
+                current[movie_id] = {
+
+                    "message_id": msg.id,
+
+                    "file_name": filename,
+
+                    "file_size": media.file_size
+                }
+
+            except Exception as inner_error:
+
+                print(
+                    "Skipped Message:",
+                    inner_error
+                )
+
                 continue
-
-            filename = getattr(
-                media,
-                "file_name",
-                None
-            )
-
-            if not filename:
-                continue
-
-            movie_id = (
-                filename
-                .replace(" ", "_")
-                .replace(".", "_")
-                .lower()
-            )
-
-            current[movie_id] = {
-
-                "message_id": msg.id,
-
-                "file_name": filename,
-
-                "file_size": media.file_size
-            }
 
         save_movies(current)
 
@@ -192,7 +206,7 @@ manifest = {
 
     "id": "org.arun.telegram",
 
-    "version": "3.0.0",
+    "version": "4.0.0",
 
     "name": "Telegram Stream Addon",
 
@@ -451,6 +465,13 @@ async def watch(
 
     file_size = media.file_size
 
+    if not file_size:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Invalid media size"
+        )
+
     # RANGE HEADER
     range_header = request.headers.get(
         "range"
@@ -482,6 +503,23 @@ async def watch(
             if downloaded >= chunk_size:
                 break
 
+    # DETECT CONTENT TYPE
+    filename = (
+        movie.get("file_name", "")
+        .lower()
+    )
+
+    content_type = "video/mp4"
+
+    if filename.endswith(".mkv"):
+        content_type = "video/x-matroska"
+
+    elif filename.endswith(".mp4"):
+        content_type = "video/mp4"
+
+    elif filename.endswith(".webm"):
+        content_type = "video/webm"
+
     # HEADERS
     headers = {
 
@@ -494,7 +532,7 @@ async def watch(
             str(chunk_size),
 
         "Content-Type":
-            "video/x-matroska"
+            content_type
     }
 
     return StreamingResponse(
