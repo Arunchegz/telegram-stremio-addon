@@ -17,6 +17,7 @@ from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
+import uvicorn
 import os
 import json
 import time
@@ -66,7 +67,7 @@ MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# Increased parallel stream support
+# Better parallel streaming
 STREAM_LIMITER = asyncio.Semaphore(4)
 
 URL_TTL = 3000
@@ -117,7 +118,7 @@ def save_movies(data):
         print("❌ DB Save Error:", e)
 
 # =========================================================
-# SYNC LATEST MOVIES
+# AUTO SYNC LATEST MOVIES
 # =========================================================
 async def sync_latest_movies(limit=5):
 
@@ -184,7 +185,6 @@ async def sync_latest_movies(limit=5):
                 .lower()
             )
 
-            # Already synced
             if movie_id in movies:
                 continue
 
@@ -201,7 +201,7 @@ async def sync_latest_movies(limit=5):
             # Cache message
             MESSAGES_CACHE[movie_id] = msg
 
-            # Pre-cache URL
+            # Pre-cache proxy URL
             URL_CACHE[movie_id] = {
                 "url": f"{BASE_URL}/proxy/{movie_id}",
                 "expires": time.time() + URL_TTL
@@ -260,6 +260,8 @@ async def get_cdn_url(
         "url": url,
         "expires": time.time() + URL_TTL
     }
+
+    print(f"🔗 Generated Proxy URL: {movie_id}")
 
     return url
 
@@ -372,7 +374,7 @@ async def reset():
 # =========================================================
 manifest = {
     "id": "org.arun.telegram",
-    "version": "23.0.0",
+    "version": "24.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
     "resources": [
@@ -405,7 +407,7 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
 
-    # Auto sync only on catalog open
+    # Auto sync on catalog open
     await sync_latest_movies()
 
     movies = load_movies()
@@ -731,12 +733,32 @@ async def proxy_stream(
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Content-Length": str(end - start + 1),
         "Content-Type": content_type,
+
+        # Better buffering
         "Cache-Control": "public, max-age=3600",
-        "Connection": "keep-alive"
+        "Connection": "keep-alive",
+
+        # Faster stream handling
+        "Keep-Alive": "timeout=30",
+
+        # Disable proxy buffering
+        "X-Accel-Buffering": "no"
     }
 
     return StreamingResponse(
         streamer(),
         status_code=206,
         headers=headers
+    )
+
+# =========================================================
+# MAIN
+# =========================================================
+if __name__ == "__main__":
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8080,
+        workers=1
     )
