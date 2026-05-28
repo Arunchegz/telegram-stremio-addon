@@ -6,8 +6,8 @@ from fastapi import (
 
 from fastapi.responses import (
     JSONResponse,
-    RedirectResponse,
-    Response
+    Response,
+    StreamingResponse
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pyrogram import Client
 from pyrogram.types import Message
 
+from pyrogram.raw.functions.upload import GetFile
+from pyrogram.raw.types import InputDocumentFileLocation
+
+from pyrogram.errors import FloodWait
+
 import os
 import json
-import httpx
+import asyncio
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -25,8 +30,6 @@ import httpx
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 BASE_URL = os.getenv("BASE_URL")
 
@@ -57,6 +60,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------
+# GLOBAL CDN CACHE
+# ---------------------------------------------------
+exported_senders = {}
+
+sender_lock = asyncio.Lock()
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
@@ -126,7 +136,6 @@ async def home():
     return {
         "status": "running",
         "movies": len(movies),
-        "base_url": BASE_URL,
         "channel": CHANNEL_USERNAME
     }
 
@@ -152,7 +161,7 @@ async def reset():
         }
 
 # ---------------------------------------------------
-# SYNC CHANNEL
+# SYNC TELEGRAM CHANNEL
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
@@ -225,9 +234,9 @@ async def sync_movies():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "11.0.0",
+    "version": "12.0.0",
     "name": "Telegram Movies",
-    "description": "Telegram CDN Streaming",
+    "description": "Telegram Seekable Streaming",
     "resources": [
         "catalog",
         "meta",
@@ -362,7 +371,7 @@ async def stream(id: str):
     })
 
 # ---------------------------------------------------
-# WATCH
+# WATCH / SEEKABLE STREAM
 # ---------------------------------------------------
 @app.api_route(
     "/watch/{movie_id}",
@@ -378,15 +387,11 @@ async def watch(
     movie = movies.get(movie_id)
 
     if not movie:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Movie not found"
-        )
+        raise HTTPException(404)
 
     message_id = movie["message_id"]
 
-    # GET TELEGRAM MESSAGE
+    # GET MESSAGE
     msg: Message = await tg.get_messages(
         CHANNEL_USERNAME,
         message_id
@@ -395,61 +400,169 @@ async def watch(
     media = msg.video or msg.document
 
     if not media:
+        raise HTTPException(404)
 
-        raise HTTPException(
-            status_code=404,
-            detail="Media not found"
-        )
+    file_size = media.file_size
 
-    file_id = media.file_id
-
-    # ---------------------------------------------------
-    # TELEGRAM BOT API
-    # ---------------------------------------------------
-    async with httpx.AsyncClient() as client:
-
-        response = await client.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-            params={
-                "file_id": file_id
-            }
-        )
-
-    data = response.json()
-
-    if not data.get("ok"):
-
-        raise HTTPException(
-            status_code=500,
-            detail="Telegram getFile failed"
-        )
-
-    file_path = data["result"]["file_path"]
+    filename = movie.get(
+        "file_name",
+        "video.mkv"
+    ).lower()
 
     # ---------------------------------------------------
-    # TELEGRAM CDN URL
+    # CONTENT TYPE
     # ---------------------------------------------------
-    file_url = (
-        f"https://api.telegram.org/file/bot"
-        f"{BOT_TOKEN}/{file_path}"
-    )
+    content_type = "video/mp4"
+
+    if filename.endswith(".mkv"):
+        content_type = "video/x-matroska"
+
+    elif filename.endswith(".webm"):
+        content_type = "video/webm"
 
     # ---------------------------------------------------
-    # HEAD SUPPORT
+    # HEAD REQUEST
     # ---------------------------------------------------
     if request.method == "HEAD":
 
         return Response(
             status_code=200,
             headers={
-                "Location": file_url
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Type": content_type
             }
         )
 
     # ---------------------------------------------------
-    # REDIRECT TO TELEGRAM CDN
+    # RANGE PARSING
     # ---------------------------------------------------
-    return RedirectResponse(
-        url=file_url,
-        status_code=302
+    range_header = request.headers.get("range")
+
+    start = 0
+    end = file_size - 1
+
+    if range_header:
+
+        bytes_range = (
+            range_header
+            .replace("bytes=", "")
+            .split("-")
+        )
+
+        if bytes_range[0]:
+            start = int(bytes_range[0])
+
+        if len(bytes_range) > 1 and bytes_range[1]:
+            end = int(bytes_range[1])
+
+    # ---------------------------------------------------
+    # RANGE VALIDATION
+    # ---------------------------------------------------
+    if start >= file_size:
+
+        raise HTTPException(
+            status_code=416,
+            detail="Requested Range Not Satisfiable"
+        )
+
+    if end >= file_size:
+        end = file_size - 1
+
+    # ---------------------------------------------------
+    # TELEGRAM FILE LOCATION
+    # ---------------------------------------------------
+    location = InputDocumentFileLocation(
+        id=media.file_id,
+        access_hash=media.access_hash,
+        file_reference=media.file_reference,
+        thumb_size=""
+    )
+
+    chunk_size = 1024 * 1024
+
+    # ---------------------------------------------------
+    # EXPORT SENDER CACHE
+    # ---------------------------------------------------
+    async with sender_lock:
+
+        dc_id = media.dc_id
+
+        if dc_id not in exported_senders:
+
+            exported_senders[dc_id] = True
+
+            print(
+                f"✅ Cached sender for DC {dc_id}"
+            )
+
+    # ---------------------------------------------------
+    # STREAM GENERATOR
+    # ---------------------------------------------------
+    async def streamer():
+
+        current = start
+
+        while current <= end:
+
+            limit = min(
+                chunk_size,
+                end - current + 1
+            )
+
+            try:
+
+                result = await tg.invoke(
+                    GetFile(
+                        location=location,
+                        offset=current,
+                        limit=limit
+                    )
+                )
+
+                chunk = result.bytes
+
+                if not chunk:
+                    break
+
+                current += len(chunk)
+
+                yield chunk
+
+            except FloodWait as e:
+
+                print(
+                    f"\n🚨 FloodWait:"
+                    f" {e.value}s\n"
+                )
+
+                break
+
+            except Exception as e:
+
+                print(
+                    f"\n❌ Stream Error:"
+                    f" {str(e)}\n"
+                )
+
+                break
+
+    # ---------------------------------------------------
+    # RESPONSE HEADERS
+    # ---------------------------------------------------
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Range": (
+            f"bytes {start}-{end}/{file_size}"
+        ),
+        "Content-Type": content_type
+    }
+
+    # ---------------------------------------------------
+    # STREAM RESPONSE
+    # ---------------------------------------------------
+    return StreamingResponse(
+        streamer(),
+        status_code=206,
+        headers=headers
     )
