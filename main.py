@@ -214,8 +214,15 @@ async def sync_movies():
                     continue
 
                 filename = getattr(media, "file_name", None)
+                
+                # ⚡ CRITICAL FIX: Fallback for videos missing a file_name attribute
                 if not filename:
-                    continue
+                    if msg.caption:
+                        # Grab the first line of the caption (max 50 chars)
+                        clean_cap = msg.caption.split("\n")[0][:50].strip()
+                        filename = f"{clean_cap}_{msg.id}.mp4"
+                    else:
+                        filename = f"untitled_video_{msg.id}.mp4"
 
                 movie_id = (
                     filename
