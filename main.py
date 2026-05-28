@@ -59,6 +59,13 @@ app.add_middleware(
 # MEMORY CACHE
 # ---------------------------------------------------
 MOVIES_CACHE = {}
+MESSAGES_CACHE = {}
+
+# ---------------------------------------------------
+# STREAM SETTINGS
+# ---------------------------------------------------
+CHUNK_SIZE = 512 * 1024          # 512KB — Pyrogram's internal offset unit
+STREAM_YIELD_SIZE = 2 * 1024 * 1024   # 2MB — buffer before yielding to client
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
@@ -119,7 +126,12 @@ async def startup():
 
     await tg.start()
 
-    print("✅ Pyrogram started")
+    # Warm up: resolve the channel to negotiate DC early
+    try:
+        await tg.get_chat(CHANNEL_USERNAME)
+        print("✅ Pyrogram started + DC warmed up")
+    except Exception as e:
+        print(f"⚠️ Warm-up warning: {e}")
 
 # ---------------------------------------------------
 # SHUTDOWN
@@ -151,7 +163,7 @@ async def home():
 @app.get("/reset")
 async def reset():
 
-    global MOVIES_CACHE
+    global MOVIES_CACHE, MESSAGES_CACHE
 
     try:
 
@@ -159,6 +171,7 @@ async def reset():
             os.remove(DB_FILE)
 
         MOVIES_CACHE = {}
+        MESSAGES_CACHE = {}
 
         return {
             "status": "database deleted"
@@ -175,6 +188,8 @@ async def reset():
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
+
+    global MESSAGES_CACHE
 
     try:
 
@@ -218,6 +233,9 @@ async def sync_movies():
                     "file_name": filename,
                     "file_size": media.file_size
                 }
+
+                # Pre-cache message objects for instant /watch lookup
+                MESSAGES_CACHE[movie_id] = msg
 
             except Exception as inner_error:
 
@@ -405,12 +423,19 @@ async def watch(
         )
 
     # ---------------------------------------------------
-    # GET TELEGRAM MESSAGE
+    # GET TELEGRAM MESSAGE (cached)
     # ---------------------------------------------------
-    msg: Message = await tg.get_messages(
-        CHANNEL_USERNAME,
-        movie["message_id"]
-    )
+    msg: Message = MESSAGES_CACHE.get(movie_id)
+
+    if not msg:
+
+        msg = await tg.get_messages(
+            CHANNEL_USERNAME,
+            movie["message_id"]
+        )
+
+        # Store in cache for future requests
+        MESSAGES_CACHE[movie_id] = msg
 
     media = msg.video or msg.document
 
@@ -501,50 +526,46 @@ async def watch(
         end = file_size - 1
 
     # ---------------------------------------------------
-    # STREAM SETTINGS
-    # ---------------------------------------------------
-    chunk_size = 1024 * 1024
-
-    # ---------------------------------------------------
     # STREAM GENERATOR
     # ---------------------------------------------------
     async def streamer():
 
         sent = 0
-
         first_chunk = True
+        buffer = b""
 
         try:
 
             async for chunk in tg.stream_media(
                 msg,
-                offset=start // chunk_size
+                offset=start // CHUNK_SIZE
             ):
 
-                # Trim first chunk
+                # Trim the first chunk to the exact start byte
                 if first_chunk:
-
-                    skip = start % chunk_size
-
-                    chunk = chunk[skip:]
-
+                    chunk = chunk[start % CHUNK_SIZE:]
                     first_chunk = False
 
-                remaining = (
-                    (end - start + 1)
-                    - sent
-                )
+                remaining = (end - start + 1) - sent
 
                 if remaining <= 0:
                     break
 
-                # Prevent extra bytes
+                # Prevent overshooting the requested range
                 if len(chunk) > remaining:
                     chunk = chunk[:remaining]
 
+                buffer += chunk
                 sent += len(chunk)
 
-                yield chunk
+                # Yield in large batches for smoother pipe
+                if len(buffer) >= STREAM_YIELD_SIZE:
+                    yield buffer
+                    buffer = b""
+
+            # Flush remaining buffer
+            if buffer:
+                yield buffer
 
         except FloodWait as e:
 
@@ -568,6 +589,7 @@ async def watch(
         "Content-Range": (
             f"bytes {start}-{end}/{file_size}"
         ),
+        "Content-Length": str(end - start + 1),
         "Content-Type": content_type
     }
 
