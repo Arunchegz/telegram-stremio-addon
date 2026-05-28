@@ -1,6 +1,4 @@
 fastapi
 uvicorn
-pyrofork
+pyrogram
 tgcrypto
-aiofiles
-aiohttp
