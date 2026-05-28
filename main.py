@@ -11,7 +11,7 @@ from fastapi.responses import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
@@ -28,15 +28,7 @@ API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 
 BASE_URL = os.getenv("BASE_URL", "")
-
-# ⚡ CRITICAL FIX: Smart detection for Channel ID vs Username
-RAW_CHANNEL = os.getenv("CHANNEL_USERNAME", "")
-try:
-    # If it's a number (like -1003025930520), convert to int
-    TARGET_CHAT = int(RAW_CHANNEL)
-except ValueError:
-    # Otherwise, it's a username string (like @mychannel)
-    TARGET_CHAT = RAW_CHANNEL
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
 
 DB_FILE = "/app/data/movies.json"
 
@@ -48,6 +40,7 @@ tg = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
+    no_updates=True,
     workers=8
 )
 
@@ -110,46 +103,6 @@ def save_movies(data):
         print("DB Save Error:", e)
 
 # ---------------------------------------------------
-# REAL-TIME SYNC (TRIGGERED ON NEW CHANNEL MESSAGE)
-# ---------------------------------------------------
-@tg.on_message(filters.chat(TARGET_CHAT) & (filters.video | filters.document))
-async def on_new_movie(client, msg: Message):
-    """Automatically adds new movies to the database the moment they are uploaded."""
-    try:
-        media = msg.video or msg.document
-        if not media:
-            return
-
-        filename = getattr(media, "file_name", None)
-        if not filename:
-            return
-
-        movie_id = (
-            filename
-            .replace(" ", "_")
-            .replace(".", "_")
-            .lower()
-        )
-
-        movies = load_movies()
-
-        movies[movie_id] = {
-            "message_id": msg.id,
-            "file_name": filename,
-            "file_size": media.file_size
-        }
-
-        # Pre-cache the message
-        MESSAGES_CACHE[movie_id] = msg
-
-        # Save the updated database
-        save_movies(movies)
-        print(f"🎬 New movie auto-synced: {filename}")
-
-    except Exception as e:
-        print(f"❌ Auto-sync Error: {e}")
-
-# ---------------------------------------------------
 # GET CACHED MESSAGE
 # ---------------------------------------------------
 async def get_message(
@@ -159,7 +112,7 @@ async def get_message(
     msg = MESSAGES_CACHE.get(movie_id)
     if not msg:
         msg = await tg.get_messages(
-            TARGET_CHAT,
+            CHANNEL_USERNAME,
             message_id
         )
         MESSAGES_CACHE[movie_id] = msg
@@ -198,8 +151,8 @@ async def get_cdn_url(
 async def startup():
     await tg.start()
     try:
-        await tg.get_chat(TARGET_CHAT)
-        print(f"✅ Pyrogram started + Listening for new movies in {TARGET_CHAT}...")
+        await tg.get_chat(CHANNEL_USERNAME)
+        print("✅ Pyrogram started + DC warmed up (TgCrypto active)")
     except Exception as e:
         print(f"⚠️ Warm-up warning: {e}")
 
@@ -222,20 +175,39 @@ async def home():
         "movies": len(movies),
         "cached_messages": len(MESSAGES_CACHE),
         "cached_urls": len(URL_CACHE),
-        "channel": str(TARGET_CHAT)
+        "channel": CHANNEL_USERNAME
     }
 
 # ---------------------------------------------------
-# RESET (Now acts as a manual full re-sync trigger)
+# RESET
 # ---------------------------------------------------
-@app.get("/sync-all")
-async def manual_full_sync():
-    """Manual endpoint to rebuild the entire database if you ever need to."""
+@app.get("/reset")
+async def reset():
+    global MOVIES_CACHE
+    global MESSAGES_CACHE
+    global URL_CACHE
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+        MOVIES_CACHE = {}
+        MESSAGES_CACHE = {}
+        URL_CACHE = {}
+        return {"status": "database deleted"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------------------------------------------------
+# SYNC CHANNEL
+# ---------------------------------------------------
+@app.get("/sync")
+async def sync_movies():
     global MESSAGES_CACHE
     try:
         current = {}
-        print("🔄 Starting full manual sync...")
-        async for msg in tg.get_chat_history(TARGET_CHAT):
+        chat = await tg.get_chat(CHANNEL_USERNAME)
+        print("✅ Channel:", chat.title)
+
+        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
             try:
                 media = msg.video or msg.document
                 if not media:
@@ -245,19 +217,31 @@ async def manual_full_sync():
                 if not filename:
                     continue
 
-                movie_id = filename.replace(" ", "_").replace(".", "_").lower()
+                movie_id = (
+                    filename
+                    .replace(" ", "_")
+                    .replace(".", "_")
+                    .lower()
+                )
 
                 current[movie_id] = {
                     "message_id": msg.id,
                     "file_name": filename,
                     "file_size": media.file_size
                 }
+
+                # Pre-cache messages
                 MESSAGES_CACHE[movie_id] = msg
-            except Exception:
+
+            except Exception as inner_error:
+                print("Skipped Message:", inner_error)
                 continue
 
         save_movies(current)
-        return {"status": "success", "total_movies": len(current)}
+        return {
+            "synced": len(current),
+            "messages_cached": len(MESSAGES_CACHE)
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -292,7 +276,6 @@ async def get_manifest():
 async def catalog():
     movies = load_movies()
     metas = []
-    
     for movie_id, movie in movies.items():
         movie_name = movie.get("file_name", "Unknown Movie")
         metas.append({
@@ -304,7 +287,6 @@ async def catalog():
             "description": movie_name,
             "posterShape": "poster"
         })
-        
     return JSONResponse({"metas": metas})
 
 # ---------------------------------------------------
