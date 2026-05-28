@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client, filters
@@ -12,14 +12,14 @@ import asyncio
 from urllib.parse import quote
 
 # ---------------------------------------------------
-# CONFIG
+# ENV
 # ---------------------------------------------------
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 
 BASE_URL = os.getenv(
     "BASE_URL",
@@ -199,7 +199,7 @@ async def full_sync():
 
     try:
 
-        async for message in tg.get_chat_history(CHANNEL_ID):
+        async for message in tg.get_chat_history(CHANNEL_USERNAME):
 
             try:
                 await add_movie(message)
@@ -215,10 +215,10 @@ async def full_sync():
 
 
 # ---------------------------------------------------
-# NEW FILES
+# AUTO NEW FILE SYNC
 # ---------------------------------------------------
 
-@tg.on_message(filters.chat(CHANNEL_ID))
+@tg.on_message(filters.chat(CHANNEL_USERNAME))
 async def new_files(client, message):
 
     try:
@@ -241,29 +241,24 @@ async def startup():
 
     try:
 
+        await asyncio.sleep(2)
+
         await tg.start()
+
+        await tg.get_me()
 
         print("✅ Pyrogram started")
 
-        me = await tg.get_me()
+        chat = await tg.get_chat(CHANNEL_USERNAME)
 
-        print(f"✅ Logged in as @{me.username}")
-
-        try:
-
-            chat = await tg.get_chat(CHANNEL_ID)
-
-            print(f"✅ Connected Channel: {chat.title}")
-
-        except Exception as e:
-
-            print(f"❌ CHANNEL ERROR: {e}")
+        print(f"✅ Connected Channel: {chat.title}")
+        print(f"✅ Channel Username: {CHANNEL_USERNAME}")
 
         asyncio.create_task(full_sync())
 
     except Exception as e:
 
-        print("STARTUP ERROR:", e)
+        print(f"❌ CHANNEL ERROR: {e}")
 
 
 # ---------------------------------------------------
@@ -456,7 +451,7 @@ async def proxy(movie_id: str, request: Request):
         raise HTTPException(404)
 
     message = await tg.get_messages(
-        CHANNEL_ID,
+        CHANNEL_USERNAME,
         movie["message_id"]
     )
 
