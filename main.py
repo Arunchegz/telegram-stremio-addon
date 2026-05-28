@@ -27,7 +27,6 @@ API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 
 BASE_URL = os.getenv("BASE_URL")
-
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 
 DB_FILE = "/app/data/movies.json"
@@ -57,40 +56,37 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
-# DATABASE FUNCTIONS
+# DATABASE FUNCTIONS (Optimized with Memory Cache)
 # ---------------------------------------------------
+MOVIES_CACHE = {}
+
 def load_movies():
+    global MOVIES_CACHE
+    
+    # Return from memory instantly if available
+    if MOVIES_CACHE:
+        return MOVIES_CACHE
 
     try:
-
         if os.path.exists(DB_FILE):
-
             with open(DB_FILE, "r") as f:
-                return json.load(f)
-
+                MOVIES_CACHE = json.load(f)
+                return MOVIES_CACHE
         return {}
-
     except Exception as e:
-
         print("DB Load Error:", e)
-
         return {}
-
 
 def save_movies(data):
-
+    global MOVIES_CACHE
     try:
-
-        os.makedirs(
-            os.path.dirname(DB_FILE),
-            exist_ok=True
-        )
-
+        os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
-
+        
+        # Update the memory cache immediately
+        MOVIES_CACHE = data
     except Exception as e:
-
         print("DB Save Error:", e)
 
 # ---------------------------------------------------
@@ -98,9 +94,7 @@ def save_movies(data):
 # ---------------------------------------------------
 @app.on_event("startup")
 async def startup():
-
     await tg.start()
-
     print("✅ Pyrogram started")
 
 # ---------------------------------------------------
@@ -108,9 +102,7 @@ async def startup():
 # ---------------------------------------------------
 @app.on_event("shutdown")
 async def shutdown():
-
     await tg.stop()
-
     print("🛑 Pyrogram stopped")
 
 # ---------------------------------------------------
@@ -118,9 +110,7 @@ async def shutdown():
 # ---------------------------------------------------
 @app.get("/")
 async def home():
-
     movies = load_movies()
-
     return {
         "status": "running",
         "movies": len(movies),
@@ -132,55 +122,33 @@ async def home():
 # ---------------------------------------------------
 @app.get("/reset")
 async def reset():
-
+    global MOVIES_CACHE
     try:
-
         if os.path.exists(DB_FILE):
             os.remove(DB_FILE)
-
-        return {
-            "status": "database deleted"
-        }
-
+        
+        MOVIES_CACHE = {} # Clear cache
+        return {"status": "database deleted"}
     except Exception as e:
-
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
 
 # ---------------------------------------------------
 # SYNC TELEGRAM CHANNEL
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
-
     try:
-
         current = {}
-
-        chat = await tg.get_chat(
-            CHANNEL_USERNAME
-        )
-
+        chat = await tg.get_chat(CHANNEL_USERNAME)
         print("✅ Channel:", chat.title)
 
-        async for msg in tg.get_chat_history(
-            CHANNEL_USERNAME
-        ):
-
+        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
             try:
-
                 media = msg.video or msg.document
-
                 if not media:
                     continue
 
-                filename = getattr(
-                    media,
-                    "file_name",
-                    None
-                )
-
+                filename = getattr(media, "file_name", None)
                 if not filename:
                     continue
 
@@ -194,29 +162,19 @@ async def sync_movies():
                 current[movie_id] = {
                     "message_id": msg.id,
                     "file_name": filename,
-                    "file_size": media.file_size
+                    "file_size": media.file_size,
+                    "file_id": media.file_id # Captured for direct streaming
                 }
 
             except Exception as inner_error:
-
-                print(
-                    "Skipped Message:",
-                    inner_error
-                )
-
+                print("Skipped Message:", inner_error)
                 continue
 
         save_movies(current)
-
-        return {
-            "movies": len(current)
-        }
+        return {"movies": len(current)}
 
     except Exception as e:
-
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
 
 # ---------------------------------------------------
 # MANIFEST
@@ -226,17 +184,9 @@ manifest = {
     "version": "13.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
-    "resources": [
-        "catalog",
-        "meta",
-        "stream"
-    ],
-    "types": [
-        "movie"
-    ],
-    "idPrefixes": [
-        "tg"
-    ],
+    "resources": ["catalog", "meta", "stream"],
+    "types": ["movie"],
+    "idPrefixes": ["tg"],
     "catalogs": [
         {
             "type": "movie",
@@ -248,7 +198,6 @@ manifest = {
 
 @app.get("/manifest.json")
 async def get_manifest():
-
     return JSONResponse(manifest)
 
 # ---------------------------------------------------
@@ -256,18 +205,11 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-
     movies = load_movies()
-
     metas = []
 
     for movie_id, movie in movies.items():
-
-        movie_name = movie.get(
-            "file_name",
-            "Unknown Movie"
-        )
-
+        movie_name = movie.get("file_name", "Unknown Movie")
         metas.append({
             "id": f"tg:{movie_id}",
             "type": "movie",
@@ -278,35 +220,21 @@ async def catalog():
             "posterShape": "poster"
         })
 
-    return JSONResponse({
-        "metas": metas
-    })
+    return JSONResponse({"metas": metas})
 
 # ---------------------------------------------------
 # META
 # ---------------------------------------------------
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
-
-    clean_id = id.replace(
-        "tg:",
-        ""
-    )
-
+    clean_id = id.replace("tg:", "")
     movies = load_movies()
-
     movie = movies.get(clean_id)
 
     if not movie:
+        return JSONResponse({"meta": {}})
 
-        return JSONResponse({
-            "meta": {}
-        })
-
-    movie_name = movie.get(
-        "file_name",
-        "Unknown Movie"
-    )
+    movie_name = movie.get("file_name", "Unknown Movie")
 
     return JSONResponse({
         "meta": {
@@ -325,89 +253,56 @@ async def meta(id: str):
 # ---------------------------------------------------
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
-
-    clean_id = id.replace(
-        "tg:",
-        ""
-    )
-
+    clean_id = id.replace("tg:", "")
     movies = load_movies()
-
     movie = movies.get(clean_id)
 
     if not movie:
+        return JSONResponse({"streams": []})
 
-        return JSONResponse({
-            "streams": []
-        })
-
-    movie_name = movie.get(
-        "file_name",
-        "Unknown Movie"
-    )
+    movie_name = movie.get("file_name", "Unknown Movie")
 
     return JSONResponse({
         "streams": [
             {
                 "name": "☁️ Telegram",
                 "title": movie_name,
-                "url": (
-                    f"{BASE_URL}/watch/"
-                    f"{clean_id}"
-                )
+                "url": f"{BASE_URL}/watch/{clean_id}"
             }
         ]
     })
 
 # ---------------------------------------------------
-# WATCH / SEEKABLE STREAM
+# WATCH / SEEKABLE STREAM (Optimized)
 # ---------------------------------------------------
 @app.api_route(
     "/watch/{movie_id}",
     methods=["GET", "HEAD"]
 )
-async def watch(
-    movie_id: str,
-    request: Request
-):
-
+async def watch(movie_id: str, request: Request):
     movies = load_movies()
-
     movie = movies.get(movie_id)
 
     if not movie:
-        raise HTTPException(404)
+        raise HTTPException(404, detail="Movie not found")
 
-    message_id = movie["message_id"]
+    # Pull variables directly from memory cache
+    file_id = movie.get("file_id")
+    file_size = movie.get("file_size")
+    filename = movie.get("file_name", "video.mkv").lower()
 
-    # ---------------------------------------------------
-    # GET TELEGRAM MESSAGE
-    # ---------------------------------------------------
-    msg: Message = await tg.get_messages(
-        CHANNEL_USERNAME,
-        message_id
-    )
-
-    media = msg.video or msg.document
-
-    if not media:
-        raise HTTPException(404)
-
-    file_size = media.file_size
-
-    filename = movie.get(
-        "file_name",
-        "video.mkv"
-    ).lower()
+    if not file_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="Database outdated. Please hit /sync to generate file_ids."
+        )
 
     # ---------------------------------------------------
     # CONTENT TYPE
     # ---------------------------------------------------
     content_type = "video/mp4"
-
     if filename.endswith(".mkv"):
         content_type = "video/x-matroska"
-
     elif filename.endswith(".webm"):
         content_type = "video/webm"
 
@@ -415,7 +310,6 @@ async def watch(
     # HEAD SUPPORT
     # ---------------------------------------------------
     if request.method == "HEAD":
-
         return Response(
             status_code=200,
             headers={
@@ -429,35 +323,23 @@ async def watch(
     # RANGE PARSING
     # ---------------------------------------------------
     range_header = request.headers.get("range")
-
     start = 0
     end = file_size - 1
 
     if range_header:
-
         try:
-
-            bytes_range = (
-                range_header
-                .replace("bytes=", "")
-                .split("-")
-            )
-
+            bytes_range = range_header.replace("bytes=", "").split("-")
             if bytes_range[0]:
                 start = int(bytes_range[0])
-
             if len(bytes_range) > 1 and bytes_range[1]:
                 end = int(bytes_range[1])
-
         except Exception as e:
-
             print("Range Parse Error:", e)
 
     # ---------------------------------------------------
     # RANGE VALIDATION
     # ---------------------------------------------------
     if start >= file_size:
-
         raise HTTPException(
             status_code=416,
             detail="Requested Range Not Satisfiable"
@@ -469,71 +351,50 @@ async def watch(
     # ---------------------------------------------------
     # STREAM SETTINGS
     # ---------------------------------------------------
-    chunk_size = 1024 * 1024
+    chunk_size = 1024 * 1024  # 1MB Telegram Native Chunks
 
     # ---------------------------------------------------
     # STREAM GENERATOR
     # ---------------------------------------------------
     async def streamer():
-
         sent = 0
-
         first_chunk = True
 
         try:
-
+            # Pass the file_id directly. This skips the get_messages API call entirely!
             async for chunk in tg.stream_media(
-                msg,
+                file_id, 
                 offset=start // chunk_size
             ):
-
-                # Trim first chunk
+                # Trim first chunk to exact requested byte
                 if first_chunk:
-
                     skip = start % chunk_size
-
                     chunk = chunk[skip:]
-
                     first_chunk = False
 
-                remaining = (
-                    (end - start + 1)
-                    - sent
-                )
-
+                remaining = (end - start + 1) - sent
+                
                 if remaining <= 0:
                     break
 
-                # Prevent extra bytes
+                # Prevent extra bytes at the end of the stream
                 if len(chunk) > remaining:
                     chunk = chunk[:remaining]
 
                 sent += len(chunk)
-
                 yield chunk
 
         except FloodWait as e:
-
-            print(
-                f"\n🚨 FloodWait:"
-                f" {e.value}s\n"
-            )
-
+            print(f"\n🚨 FloodWait: {e.value}s\n")
         except Exception as e:
-
-            print(
-                f"\n❌ Stream Error:"
-                f" {str(e)}\n"
-            )
+            print(f"\n❌ Stream Error: {str(e)}\n")
 
     # ---------------------------------------------------
     # RESPONSE HEADERS
     # ---------------------------------------------------
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Range": (
-            f"bytes {start}-{end}/{file_size}"
-        ),
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Content-Type": content_type
     }
 
