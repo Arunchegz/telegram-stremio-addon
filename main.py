@@ -13,7 +13,11 @@ from fastapi.responses import (
 
 from fastapi.middleware.cors import CORSMiddleware
 
-from pyrogram import Client
+from pyrogram import (
+    Client,
+    filters
+)
+
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
@@ -155,6 +159,7 @@ def load_movies():
     except Exception as e:
 
         print("DB Load Error:", e)
+
         return {}
 
 
@@ -237,20 +242,10 @@ async def get_cdn_url(
 # ---------------------------------------------------
 # AUTO SYNC NEW FILES
 # ---------------------------------------------------
-@tg.on_message()
+@tg.on_message(filters.chat(CHANNEL_USERNAME))
 async def auto_sync(_, msg: Message):
 
     try:
-
-        if not msg.chat:
-            return
-
-        # Only target channel
-        if (
-            str(msg.chat.username).lower()
-            != str(CHANNEL_USERNAME).replace("@", "").lower()
-        ):
-            return
 
         media = msg.video or msg.document
 
@@ -428,7 +423,7 @@ async def reset():
 # ---------------------------------------------------
 manifest = {
     "id": "org.arun.telegram",
-    "version": "19.0.0",
+    "version": "20.0.0",
     "name": "Telegram Movies",
     "description": "Fast Telegram Seekable Streaming",
     "resources": ["catalog", "meta", "stream"],
