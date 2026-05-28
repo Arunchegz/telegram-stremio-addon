@@ -12,7 +12,7 @@ import os
 import json
 
 # ---------------------------------------------------
-# ENV
+# ENV VARIABLES
 # ---------------------------------------------------
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -34,7 +34,7 @@ tg = Client(
 )
 
 # ---------------------------------------------------
-# FASTAPI
+# FASTAPI APP
 # ---------------------------------------------------
 app = FastAPI()
 
@@ -47,7 +47,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
-# DATABASE
+# DATABASE FUNCTIONS
 # ---------------------------------------------------
 def load_movies():
 
@@ -67,13 +67,19 @@ def load_movies():
 
 def save_movies(data):
 
-    os.makedirs(
-        os.path.dirname(DB_FILE),
-        exist_ok=True
-    )
+    try:
 
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+        os.makedirs(
+            os.path.dirname(DB_FILE),
+            exist_ok=True
+        )
+
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+    except Exception as e:
+
+        print(f"DB Save Error: {e}")
 
 # ---------------------------------------------------
 # STARTUP
@@ -112,47 +118,70 @@ async def reset():
 @app.get("/sync")
 async def sync_movies():
 
-    current = {}
+    try:
 
-    async for msg in tg.get_chat_history(
-        CHANNEL_ID
-    ):
+        current = {}
 
-        media = (
-            msg.video or
-            msg.document
+        # ---------------------------------------------------
+        # FORCE CHANNEL RESOLVE
+        # ---------------------------------------------------
+        chat = await tg.get_chat(
+            CHANNEL_ID
         )
 
-        if not media:
-            continue
-
-        filename = getattr(
-            media,
-            "file_name",
-            None
+        print(
+            "Resolved Chat:",
+            chat.title
         )
 
-        if not filename:
-            continue
+        # ---------------------------------------------------
+        # READ CHANNEL HISTORY
+        # ---------------------------------------------------
+        async for msg in tg.get_chat_history(
+            CHANNEL_ID
+        ):
 
-        movie_id = (
-            filename
-            .replace(" ", "_")
-            .replace(".", "_")
-            .lower()
-        )
+            media = (
+                msg.video or
+                msg.document
+            )
 
-        current[movie_id] = {
-            "message_id": msg.id,
-            "file_name": filename,
-            "file_size": media.file_size
+            if not media:
+                continue
+
+            filename = getattr(
+                media,
+                "file_name",
+                None
+            )
+
+            if not filename:
+                continue
+
+            movie_id = (
+                filename
+                .replace(" ", "_")
+                .replace(".", "_")
+                .lower()
+            )
+
+            current[movie_id] = {
+                "message_id": msg.id,
+                "file_name": filename,
+                "file_size": media.file_size
+            }
+
+        save_movies(current)
+
+        return {
+            "movies": len(current)
         }
 
-    save_movies(current)
+    except Exception as e:
 
-    return {
-        "movies": len(current)
-    }
+        return {
+            "error": str(e)
+        }
 
 # ---------------------------------------------------
 # MANIFEST
@@ -161,7 +190,7 @@ manifest = {
     "id": "org.arun.telegram",
     "version": "2.0.0",
     "name": "Telegram Stream Addon",
-    "description": "Telegram MTProto streaming",
+    "description": "Telegram MTProto Streaming",
 
     "resources": [
         "catalog",
@@ -322,7 +351,7 @@ async def stream(id: str):
                 ),
 
                 "behaviorHints": {
-                    "notWebReady": False
+                    "notWebReady": True
                 }
             }
         ]
@@ -357,7 +386,7 @@ def parse_range(
     return start, end
 
 # ---------------------------------------------------
-# WATCH / STREAMING
+# WATCH / STREAM
 # ---------------------------------------------------
 @app.get("/watch/{movie_id}")
 async def watch(
@@ -377,7 +406,7 @@ async def watch(
         )
 
     # ---------------------------------------------------
-    # BACKWARD COMPATIBILITY
+    # OLD DB CHECK
     # ---------------------------------------------------
     if "message_id" not in movie:
 
@@ -391,6 +420,14 @@ async def watch(
 
     message_id = movie["message_id"]
 
+    # ---------------------------------------------------
+    # FORCE CHAT RESOLVE
+    # ---------------------------------------------------
+    await tg.get_chat(CHANNEL_ID)
+
+    # ---------------------------------------------------
+    # GET MESSAGE
+    # ---------------------------------------------------
     msg: Message = await tg.get_messages(
         CHANNEL_ID,
         message_id
@@ -401,8 +438,18 @@ async def watch(
         msg.document
     )
 
+    if not media:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Media not found"
+        )
+
     file_size = media.file_size
 
+    # ---------------------------------------------------
+    # RANGE HEADER
+    # ---------------------------------------------------
     range_header = request.headers.get(
         "range"
     )
@@ -416,6 +463,9 @@ async def watch(
         end - start
     ) + 1
 
+    # ---------------------------------------------------
+    # STREAM GENERATOR
+    # ---------------------------------------------------
     async def file_stream():
 
         downloaded = 0
@@ -432,7 +482,11 @@ async def watch(
             if downloaded >= chunk_size:
                 break
 
+    # ---------------------------------------------------
+    # HEADERS
+    # ---------------------------------------------------
     headers = {
+
         "Accept-Ranges": "bytes",
 
         "Content-Range":
@@ -442,7 +496,7 @@ async def watch(
             str(chunk_size),
 
         "Content-Type":
-            "video/mp4"
+            "video/x-matroska"
     }
 
     return StreamingResponse(
@@ -462,5 +516,6 @@ async def home():
     return {
         "status": "running",
         "movies": len(movies),
-        "db_path": DB_FILE
+        "db_path": DB_FILE,
+        "channel_id": CHANNEL_ID
     }
