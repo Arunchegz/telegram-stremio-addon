@@ -7,7 +7,7 @@ from fastapi import (
 from fastapi.responses import (
     JSONResponse,
     Response,
-    StreamingResponse
+    RedirectResponse
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,7 @@ from pyrogram.errors import FloodWait
 
 import os
 import json
+import time
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -60,12 +61,12 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
+URL_CACHE = {}
 
 # ---------------------------------------------------
-# STREAM SETTINGS
+# URL TTL (50 minutes — safe before Telegram's ~1hr expiry)
 # ---------------------------------------------------
-CHUNK_SIZE = 512 * 1024          # 512KB — Pyrogram's internal offset unit
-STREAM_YIELD_SIZE = 2 * 1024 * 1024   # 2MB — buffer before yielding to client
+URL_TTL = 3000
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
@@ -74,7 +75,6 @@ def load_movies():
 
     global MOVIES_CACHE
 
-    # Return memory cache instantly
     if MOVIES_CACHE:
         return MOVIES_CACHE
 
@@ -111,12 +111,57 @@ def save_movies(data):
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
-        # Update memory cache
         MOVIES_CACHE = data
 
     except Exception as e:
 
         print("DB Save Error:", e)
+
+# ---------------------------------------------------
+# GET CACHED MESSAGE
+# ---------------------------------------------------
+async def get_message(movie_id: str, message_id: int) -> Message:
+
+    msg = MESSAGES_CACHE.get(movie_id)
+
+    if not msg:
+
+        msg = await tg.get_messages(
+            CHANNEL_USERNAME,
+            message_id
+        )
+
+        MESSAGES_CACHE[movie_id] = msg
+
+    return msg
+
+# ---------------------------------------------------
+# GET CDN URL (cached with expiry)
+# ---------------------------------------------------
+async def get_cdn_url(movie_id: str, msg: Message) -> str:
+
+    cached = URL_CACHE.get(movie_id)
+
+    # Return cached URL if still valid
+    if cached and time.time() < cached["expires"]:
+
+        print(f"✅ URL Cache Hit: {movie_id}")
+
+        return cached["url"]
+
+    # Generate fresh CDN URL
+    media = msg.video or msg.document
+
+    url = await tg.get_file_url(media)
+
+    URL_CACHE[movie_id] = {
+        "url": url,
+        "expires": time.time() + URL_TTL
+    }
+
+    print(f"🔗 Fresh CDN URL: {movie_id}")
+
+    return url
 
 # ---------------------------------------------------
 # STARTUP
@@ -126,7 +171,7 @@ async def startup():
 
     await tg.start()
 
-    # Warm up: resolve the channel to negotiate DC early
+    # Warm up DC connection
     try:
         await tg.get_chat(CHANNEL_USERNAME)
         print("✅ Pyrogram started + DC warmed up")
@@ -154,6 +199,8 @@ async def home():
     return {
         "status": "running",
         "movies": len(movies),
+        "cached_messages": len(MESSAGES_CACHE),
+        "cached_urls": len(URL_CACHE),
         "channel": CHANNEL_USERNAME
     }
 
@@ -163,7 +210,7 @@ async def home():
 @app.get("/reset")
 async def reset():
 
-    global MOVIES_CACHE, MESSAGES_CACHE
+    global MOVIES_CACHE, MESSAGES_CACHE, URL_CACHE
 
     try:
 
@@ -172,6 +219,7 @@ async def reset():
 
         MOVIES_CACHE = {}
         MESSAGES_CACHE = {}
+        URL_CACHE = {}
 
         return {
             "status": "database deleted"
@@ -234,7 +282,7 @@ async def sync_movies():
                     "file_size": media.file_size
                 }
 
-                # Pre-cache message objects for instant /watch lookup
+                # Pre-cache message objects
                 MESSAGES_CACHE[movie_id] = msg
 
             except Exception as inner_error:
@@ -249,7 +297,8 @@ async def sync_movies():
         save_movies(current)
 
         return {
-            "movies": len(current)
+            "synced": len(current),
+            "messages_cached": len(MESSAGES_CACHE)
         }
 
     except Exception as e:
@@ -361,7 +410,7 @@ async def meta(id: str):
     })
 
 # ---------------------------------------------------
-# STREAM
+# STREAM — returns direct CDN URL
 # ---------------------------------------------------
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
@@ -386,21 +435,50 @@ async def stream(id: str):
         "Unknown Movie"
     )
 
-    return JSONResponse({
-        "streams": [
-            {
-                "name": "☁️ Telegram",
-                "title": movie_name,
-                "url": (
-                    f"{BASE_URL}/watch/"
-                    f"{clean_id}"
-                )
-            }
-        ]
-    })
+    try:
+
+        # Get cached or fresh message
+        msg = await get_message(
+            clean_id,
+            movie["message_id"]
+        )
+
+        # Get cached or fresh CDN URL
+        cdn_url = await get_cdn_url(
+            clean_id,
+            msg
+        )
+
+        return JSONResponse({
+            "streams": [
+                {
+                    "name": "⚡ Telegram CDN",
+                    "title": movie_name,
+                    "url": cdn_url
+                }
+            ]
+        })
+
+    except Exception as e:
+
+        print(f"❌ Stream URL Error: {e}")
+
+        # Fallback to proxy stream if CDN URL fails
+        return JSONResponse({
+            "streams": [
+                {
+                    "name": "☁️ Telegram Proxy",
+                    "title": movie_name,
+                    "url": (
+                        f"{BASE_URL}/watch/"
+                        f"{clean_id}"
+                    )
+                }
+            ]
+        })
 
 # ---------------------------------------------------
-# WATCH / SEEKABLE STREAM
+# WATCH — redirect to CDN URL
 # ---------------------------------------------------
 @app.api_route(
     "/watch/{movie_id}",
@@ -422,182 +500,72 @@ async def watch(
             detail="Movie not found"
         )
 
-    # ---------------------------------------------------
-    # GET TELEGRAM MESSAGE (cached)
-    # ---------------------------------------------------
-    msg: Message = MESSAGES_CACHE.get(movie_id)
+    try:
 
-    if not msg:
-
-        msg = await tg.get_messages(
-            CHANNEL_USERNAME,
+        # Get cached or fresh message
+        msg = await get_message(
+            movie_id,
             movie["message_id"]
         )
 
-        # Store in cache for future requests
-        MESSAGES_CACHE[movie_id] = msg
+        media = msg.video or msg.document
 
-    media = msg.video or msg.document
+        if not media:
 
-    if not media:
+            raise HTTPException(
+                status_code=404,
+                detail="Media not found"
+            )
+
+        # HEAD — return file info without redirect
+        if request.method == "HEAD":
+
+            file_size = movie.get(
+                "file_size",
+                media.file_size
+            )
+
+            filename = movie.get(
+                "file_name",
+                "video.mkv"
+            ).lower()
+
+            content_type = "video/mp4"
+
+            if filename.endswith(".mkv"):
+                content_type = "video/x-matroska"
+            elif filename.endswith(".webm"):
+                content_type = "video/webm"
+
+            return Response(
+                status_code=200,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(file_size),
+                    "Content-Type": content_type
+                }
+            )
+
+        # GET — redirect to CDN URL
+        cdn_url = await get_cdn_url(
+            movie_id,
+            msg
+        )
+
+        return RedirectResponse(
+            url=cdn_url,
+            status_code=302
+        )
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        print(f"❌ Watch Error: {e}")
 
         raise HTTPException(
-            status_code=404,
-            detail="Media not found"
+            status_code=500,
+            detail=str(e)
         )
-
-    file_size = movie.get(
-        "file_size",
-        media.file_size
-    )
-
-    filename = movie.get(
-        "file_name",
-        "video.mkv"
-    ).lower()
-
-    # ---------------------------------------------------
-    # CONTENT TYPE
-    # ---------------------------------------------------
-    content_type = "video/mp4"
-
-    if filename.endswith(".mkv"):
-        content_type = "video/x-matroska"
-
-    elif filename.endswith(".webm"):
-        content_type = "video/webm"
-
-    # ---------------------------------------------------
-    # HEAD SUPPORT
-    # ---------------------------------------------------
-    if request.method == "HEAD":
-
-        return Response(
-            status_code=200,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(file_size),
-                "Content-Type": content_type
-            }
-        )
-
-    # ---------------------------------------------------
-    # RANGE PARSING
-    # ---------------------------------------------------
-    range_header = request.headers.get("range")
-
-    start = 0
-    end = file_size - 1
-
-    if range_header:
-
-        try:
-
-            bytes_range = (
-                range_header
-                .replace("bytes=", "")
-                .split("-")
-            )
-
-            if bytes_range[0]:
-                start = int(bytes_range[0])
-
-            if len(bytes_range) > 1 and bytes_range[1]:
-                end = int(bytes_range[1])
-
-        except Exception as e:
-
-            print(
-                "Range Parse Error:",
-                e
-            )
-
-    # ---------------------------------------------------
-    # RANGE VALIDATION
-    # ---------------------------------------------------
-    if start >= file_size:
-
-        raise HTTPException(
-            status_code=416,
-            detail="Requested Range Not Satisfiable"
-        )
-
-    if end >= file_size:
-        end = file_size - 1
-
-    # ---------------------------------------------------
-    # STREAM GENERATOR
-    # ---------------------------------------------------
-    async def streamer():
-
-        sent = 0
-        first_chunk = True
-        buffer = b""
-
-        try:
-
-            async for chunk in tg.stream_media(
-                msg,
-                offset=start // CHUNK_SIZE
-            ):
-
-                # Trim the first chunk to the exact start byte
-                if first_chunk:
-                    chunk = chunk[start % CHUNK_SIZE:]
-                    first_chunk = False
-
-                remaining = (end - start + 1) - sent
-
-                if remaining <= 0:
-                    break
-
-                # Prevent overshooting the requested range
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-
-                buffer += chunk
-                sent += len(chunk)
-
-                # Yield in large batches for smoother pipe
-                if len(buffer) >= STREAM_YIELD_SIZE:
-                    yield buffer
-                    buffer = b""
-
-            # Flush remaining buffer
-            if buffer:
-                yield buffer
-
-        except FloodWait as e:
-
-            print(
-                f"\n🚨 FloodWait:"
-                f" {e.value}s\n"
-            )
-
-        except Exception as e:
-
-            print(
-                f"\n❌ Stream Error:"
-                f" {str(e)}\n"
-            )
-
-    # ---------------------------------------------------
-    # RESPONSE HEADERS
-    # ---------------------------------------------------
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Range": (
-            f"bytes {start}-{end}/{file_size}"
-        ),
-        "Content-Length": str(end - start + 1),
-        "Content-Type": content_type
-    }
-
-    # ---------------------------------------------------
-    # STREAM RESPONSE
-    # ---------------------------------------------------
-    return StreamingResponse(
-        streamer(),
-        status_code=206,
-        headers=headers
-    )
