@@ -17,7 +17,6 @@ from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
-import uvicorn
 import os
 import json
 import time
@@ -67,8 +66,7 @@ MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# Better parallel streaming
-STREAM_LIMITER = asyncio.Semaphore(4)
+STREAM_LIMITER = asyncio.Semaphore(2)
 
 URL_TTL = 3000
 
@@ -118,107 +116,6 @@ def save_movies(data):
         print("❌ DB Save Error:", e)
 
 # =========================================================
-# AUTO SYNC LATEST MOVIES
-# =========================================================
-async def sync_latest_movies(limit=5):
-
-    global MESSAGES_CACHE
-    global URL_CACHE
-
-    try:
-
-        movies = load_movies()
-
-        chat = await tg.get_chat(CHANNEL_USERNAME)
-
-        updated = False
-
-        async for msg in tg.get_chat_history(
-            chat.id,
-            limit=limit
-        ):
-
-            media = (
-                msg.video
-                or msg.document
-                or msg.animation
-                or msg.audio
-                or msg.voice
-                or msg.video_note
-            )
-
-            if not media:
-                continue
-
-            filename = getattr(
-                media,
-                "file_name",
-                None
-            )
-
-            if not filename:
-
-                mime = getattr(
-                    media,
-                    "mime_type",
-                    ""
-                )
-
-                ext = "mp4"
-
-                if "mkv" in mime:
-                    ext = "mkv"
-
-                elif "webm" in mime:
-                    ext = "webm"
-
-                elif "mp3" in mime:
-                    ext = "mp3"
-
-                filename = f"telegram_{msg.id}.{ext}"
-
-            movie_id = (
-                filename
-                .replace(" ", "_")
-                .replace(".", "_")
-                .replace("-", "_")
-                .lower()
-            )
-
-            if movie_id in movies:
-                continue
-
-            movies[movie_id] = {
-                "message_id": msg.id,
-                "file_name": filename,
-                "file_size": getattr(
-                    media,
-                    "file_size",
-                    0
-                )
-            }
-
-            # Cache message
-            MESSAGES_CACHE[movie_id] = msg
-
-            # Pre-cache proxy URL
-            URL_CACHE[movie_id] = {
-                "url": f"{BASE_URL}/proxy/{movie_id}",
-                "expires": time.time() + URL_TTL
-            }
-
-            updated = True
-
-            print(f"🎬 Synced: {filename}")
-
-        if updated:
-            save_movies(movies)
-
-    except Exception as e:
-
-        print(f"❌ Sync Error: {e}")
-
-# =========================================================
 # GET MESSAGE
 # =========================================================
 async def get_message(
@@ -236,8 +133,7 @@ async def get_message(
         message_id
     )
 
-    if msg:
-        MESSAGES_CACHE[movie_id] = msg
+    MESSAGES_CACHE[movie_id] = msg
 
     return msg
 
@@ -254,14 +150,24 @@ async def get_cdn_url(
     if cached and time.time() < cached["expires"]:
         return cached["url"]
 
+    media = (
+        msg.video
+        or msg.document
+        or msg.animation
+        or msg.audio
+        or msg.voice
+        or msg.video_note
+    )
+
+    if not media:
+        raise Exception("Media not found")
+
     url = f"{BASE_URL}/proxy/{movie_id}"
 
     URL_CACHE[movie_id] = {
         "url": url,
         "expires": time.time() + URL_TTL
     }
-
-    print(f"🔗 Generated Proxy URL: {movie_id}")
 
     return url
 
@@ -341,6 +247,35 @@ async def test():
         }
 
 # =========================================================
+# DEBUG
+# =========================================================
+@app.get("/debug")
+async def debug():
+
+    results = []
+
+    chat = await tg.get_chat(CHANNEL_USERNAME)
+
+    async for msg in tg.get_chat_history(
+        chat.id,
+        limit=20
+    ):
+
+        results.append({
+            "id": msg.id,
+            "text": msg.text,
+            "video": bool(msg.video),
+            "document": bool(msg.document),
+            "animation": bool(msg.animation),
+            "photo": bool(msg.photo),
+            "audio": bool(msg.audio),
+            "voice": bool(msg.voice),
+            "video_note": bool(msg.video_note),
+        })
+
+    return results
+
+# =========================================================
 # RESET
 # =========================================================
 @app.get("/reset")
@@ -370,11 +305,132 @@ async def reset():
         }
 
 # =========================================================
+# SYNC
+# =========================================================
+@app.get("/sync")
+async def sync_movies():
+
+    global MESSAGES_CACHE
+
+    try:
+
+        current = {}
+
+        print(f"📡 Syncing: {CHANNEL_USERNAME}")
+
+        chat = await tg.get_chat(CHANNEL_USERNAME)
+
+        print(f"✅ Connected: {chat.title}")
+
+        total_messages = 0
+        media_messages = 0
+
+        async for msg in tg.get_chat_history(
+            chat.id,
+            limit=5000
+        ):
+
+            total_messages += 1
+
+            try:
+
+                media = (
+                    msg.video
+                    or msg.document
+                    or msg.animation
+                    or msg.audio
+                    or msg.voice
+                    or msg.video_note
+                )
+
+                if not media:
+                    continue
+
+                media_messages += 1
+
+                filename = getattr(
+                    media,
+                    "file_name",
+                    None
+                )
+
+                if not filename:
+
+                    mime = getattr(
+                        media,
+                        "mime_type",
+                        ""
+                    )
+
+                    ext = "mp4"
+
+                    if "mkv" in mime:
+                        ext = "mkv"
+
+                    elif "webm" in mime:
+                        ext = "webm"
+
+                    elif "mp3" in mime:
+                        ext = "mp3"
+
+                    filename = f"telegram_{msg.id}.{ext}"
+
+                movie_id = (
+                    filename
+                    .replace(" ", "_")
+                    .replace(".", "_")
+                    .replace("-", "_")
+                    .lower()
+                )
+
+                current[movie_id] = {
+                    "message_id": msg.id,
+                    "file_name": filename,
+                    "file_size": getattr(
+                        media,
+                        "file_size",
+                        0
+                    )
+                }
+
+                MESSAGES_CACHE[movie_id] = msg
+
+                print(f"✅ Added: {filename}")
+
+            except Exception as inner_error:
+
+                print(
+                    f"⚠️ Skipped {msg.id}: {inner_error}"
+                )
+
+        save_movies(current)
+
+        return {
+            "status": "success",
+            "total_messages": total_messages,
+            "media_messages": media_messages,
+            "synced": len(current),
+            "messages_cached": len(MESSAGES_CACHE)
+        }
+
+    except Exception as e:
+
+        print("❌ Sync Error:", e)
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": str(e)
+            }
+        )
+
+# =========================================================
 # MANIFEST
 # =========================================================
 manifest = {
     "id": "org.arun.telegram",
-    "version": "24.0.0",
+    "version": "19.0.0",
     "name": "Telegram Movies",
     "description": "Telegram Seekable Streaming",
     "resources": [
@@ -406,9 +462,6 @@ async def get_manifest():
 # =========================================================
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-
-    # Auto sync on catalog open
-    await sync_latest_movies()
 
     movies = load_movies()
 
@@ -733,32 +786,12 @@ async def proxy_stream(
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Content-Length": str(end - start + 1),
         "Content-Type": content_type,
-
-        # Better buffering
         "Cache-Control": "public, max-age=3600",
-        "Connection": "keep-alive",
-
-        # Faster stream handling
-        "Keep-Alive": "timeout=30",
-
-        # Disable proxy buffering
-        "X-Accel-Buffering": "no"
+        "Connection": "keep-alive"
     }
 
     return StreamingResponse(
         streamer(),
         status_code=206,
         headers=headers
-    )
-
-# =========================================================
-# MAIN
-# =========================================================
-if __name__ == "__main__":
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8080,
-        workers=1
     )
