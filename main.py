@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse
@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client
 from pyrogram.types import Message
+
+from math import floor
 
 import os
 import json
@@ -231,7 +233,7 @@ manifest = {
         "org.arun.telegram",
 
     "version":
-        "5.0.0",
+        "6.0.0",
 
     "name":
         "Telegram Stream Addon",
@@ -428,11 +430,12 @@ async def stream(id: str):
     })
 
 # ---------------------------------------------------
-# WATCH / STREAM
+# WATCH / SEEKABLE STREAM
 # ---------------------------------------------------
 @app.get("/watch/{movie_id}")
 async def watch(
-    movie_id: str
+    movie_id: str,
+    request: Request
 ):
 
     movies = load_movies()
@@ -475,6 +478,8 @@ async def watch(
             detail="Media not found"
         )
 
+    file_size = media.file_size
+
     filename = (
         movie.get("file_name", "")
         .lower()
@@ -498,27 +503,121 @@ async def watch(
         )
 
     # ----------------------------------------
-    # SIMPLE STREAM
+    # RANGE HEADER
+    # ----------------------------------------
+    range_header = request.headers.get(
+        "range",
+        None
+    )
+
+    start = 0
+    end = file_size - 1
+
+    if range_header:
+
+        bytes_range = (
+            range_header
+            .replace("bytes=", "")
+        )
+
+        parts = bytes_range.split("-")
+
+        if parts[0]:
+            start = int(parts[0])
+
+        if len(parts) > 1 and parts[1]:
+            end = int(parts[1])
+
+    # ----------------------------------------
+    # TELEGRAM CHUNK ALIGNMENT
+    # ----------------------------------------
+    telegram_chunk_size = (
+        1024 * 1024
+    )
+
+    aligned_start = (
+        floor(
+            start /
+            telegram_chunk_size
+        )
+        *
+        telegram_chunk_size
+    )
+
+    skip_bytes = (
+        start - aligned_start
+    )
+
+    content_length = (
+        end - start
+    ) + 1
+
+    # ----------------------------------------
+    # STREAM GENERATOR
     # ----------------------------------------
     async def file_stream():
 
+        sent = 0
+
+        first_chunk = True
+
         async for chunk in tg.stream_media(
-            msg
+            msg,
+            offset=aligned_start
         ):
 
+            # --------------------------------
+            # SKIP EXTRA BYTES
+            # --------------------------------
+            if first_chunk:
+
+                chunk = chunk[
+                    skip_bytes:
+                ]
+
+                first_chunk = False
+
+            remaining = (
+                content_length - sent
+            )
+
+            if remaining <= 0:
+                break
+
+            chunk = chunk[:remaining]
+
+            sent += len(chunk)
+
             yield chunk
+
+    # ----------------------------------------
+    # RESPONSE HEADERS
+    # ----------------------------------------
+    headers = {
+
+        "Accept-Ranges":
+            "bytes",
+
+        "Content-Range":
+            (
+                f"bytes {start}-{end}/"
+                f"{file_size}"
+            ),
+
+        "Content-Length":
+            str(content_length),
+
+        "Content-Type":
+            content_type
+    }
 
     return StreamingResponse(
 
         file_stream(),
 
-        media_type=content_type,
+        status_code=206,
 
-        headers={
-
-            "Accept-Ranges":
-                "bytes"
-        }
+        headers=headers
     )
 
 # ---------------------------------------------------
