@@ -3,12 +3,14 @@ from fastapi import (
     HTTPException,
     Request
 )
+
 from fastapi.responses import (
     JSONResponse,
     Response,
     RedirectResponse,
     StreamingResponse
 )
+
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client
@@ -20,9 +22,9 @@ import json
 import time
 import asyncio
 
-# ---------------------------------------------------
+# ===================================================
 # ENV VARIABLES
-# ---------------------------------------------------
+# ===================================================
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
@@ -32,9 +34,9 @@ CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
 
 DB_FILE = "/app/data/movies.json"
 
-# ---------------------------------------------------
+# ===================================================
 # PYROGRAM CLIENT
-# ---------------------------------------------------
+# ===================================================
 tg = Client(
     "streamer",
     api_id=API_ID,
@@ -44,9 +46,9 @@ tg = Client(
     workers=8
 )
 
-# ---------------------------------------------------
+# ===================================================
 # FASTAPI
-# ---------------------------------------------------
+# ===================================================
 app = FastAPI()
 
 app.add_middleware(
@@ -57,22 +59,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------
-# MEMORY CACHE
-# ---------------------------------------------------
+# ===================================================
+# CACHE
+# ===================================================
 MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# Prevent Telegram FloodWaits
 STREAM_LIMITER = asyncio.Semaphore(2)
 
-# URL CACHE TTL
 URL_TTL = 3000
 
-# ---------------------------------------------------
-# DATABASE FUNCTIONS
-# ---------------------------------------------------
+# ===================================================
+# DATABASE
+# ===================================================
 def load_movies():
     global MOVIES_CACHE
 
@@ -83,9 +83,8 @@ def load_movies():
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "r") as f:
                 MOVIES_CACHE = json.load(f)
-                return MOVIES_CACHE
 
-        return {}
+        return MOVIES_CACHE
 
     except Exception as e:
         print("❌ DB Load Error:", e)
@@ -108,29 +107,31 @@ def save_movies(data):
     except Exception as e:
         print("❌ DB Save Error:", e)
 
-# ---------------------------------------------------
+# ===================================================
 # GET MESSAGE
-# ---------------------------------------------------
+# ===================================================
 async def get_message(
     movie_id: str,
     message_id: int
 ) -> Message:
 
-    msg = MESSAGES_CACHE.get(movie_id)
+    cached = MESSAGES_CACHE.get(movie_id)
 
-    if not msg:
-        msg = await tg.get_messages(
-            CHANNEL_USERNAME,
-            message_id
-        )
+    if cached:
+        return cached
 
-        MESSAGES_CACHE[movie_id] = msg
+    msg = await tg.get_messages(
+        CHANNEL_USERNAME,
+        message_id
+    )
+
+    MESSAGES_CACHE[movie_id] = msg
 
     return msg
 
-# ---------------------------------------------------
-# GET CDN URL
-# ---------------------------------------------------
+# ===================================================
+# CDN URL
+# ===================================================
 async def get_cdn_url(
     movie_id: str,
     msg: Message
@@ -139,7 +140,6 @@ async def get_cdn_url(
     cached = URL_CACHE.get(movie_id)
 
     if cached and time.time() < cached["expires"]:
-        print(f"✅ URL Cache Hit: {movie_id}")
         return cached["url"]
 
     media = msg.video or msg.document
@@ -147,7 +147,6 @@ async def get_cdn_url(
     if not media:
         raise Exception("Media not found")
 
-    # Use internal proxy
     url = f"{BASE_URL}/proxy/{movie_id}"
 
     URL_CACHE[movie_id] = {
@@ -155,39 +154,42 @@ async def get_cdn_url(
         "expires": time.time() + URL_TTL
     }
 
-    print(f"🔗 Generated URL: {movie_id}")
-
     return url
 
-# ---------------------------------------------------
+# ===================================================
 # STARTUP
-# ---------------------------------------------------
+# ===================================================
 @app.on_event("startup")
 async def startup():
+
     await tg.start()
 
     try:
         chat = await tg.get_chat(CHANNEL_USERNAME)
 
-        print("✅ Pyrogram started")
-        print(f"✅ Connected to: {chat.title}")
+        print("✅ Pyrogram Started")
+        print(f"✅ Connected To: {chat.title}")
+        print(f"🆔 Chat ID: {chat.id}")
 
     except Exception as e:
-        print(f"⚠️ Startup Warning: {e}")
+        print("❌ Startup Error:", e)
 
-# ---------------------------------------------------
+# ===================================================
 # SHUTDOWN
-# ---------------------------------------------------
+# ===================================================
 @app.on_event("shutdown")
 async def shutdown():
-    await tg.stop()
-    print("🛑 Pyrogram stopped")
 
-# ---------------------------------------------------
+    await tg.stop()
+
+    print("🛑 Pyrogram Stopped")
+
+# ===================================================
 # HOME
-# ---------------------------------------------------
+# ===================================================
 @app.get("/")
 async def home():
+
     movies = load_movies()
 
     return {
@@ -198,11 +200,12 @@ async def home():
         "channel": CHANNEL_USERNAME
     }
 
-# ---------------------------------------------------
-# TEST TELEGRAM ACCESS
-# ---------------------------------------------------
+# ===================================================
+# TEST TELEGRAM
+# ===================================================
 @app.get("/test")
 async def test():
+
     try:
         chat = await tg.get_chat(CHANNEL_USERNAME)
 
@@ -218,11 +221,12 @@ async def test():
             "error": str(e)
         }
 
-# ---------------------------------------------------
-# RESET DATABASE
-# ---------------------------------------------------
+# ===================================================
+# RESET
+# ===================================================
 @app.get("/reset")
 async def reset():
+
     global MOVIES_CACHE
     global MESSAGES_CACHE
     global URL_CACHE
@@ -244,41 +248,70 @@ async def reset():
             "error": str(e)
         }
 
-# ---------------------------------------------------
-# SYNC CHANNEL
-# ---------------------------------------------------
+# ===================================================
+# SYNC
+# ===================================================
 @app.get("/sync")
 async def sync_movies():
 
     global MESSAGES_CACHE
 
     try:
+
         current = {}
 
-        print(f"📡 Syncing from: {CHANNEL_USERNAME}")
+        print(f"📡 Syncing: {CHANNEL_USERNAME}")
 
-        # Validate channel access
         chat = await tg.get_chat(CHANNEL_USERNAME)
 
-        print(f"✅ Connected to channel: {chat.title}")
+        print(f"✅ Channel: {chat.title}")
 
-        count = 0
+        total_messages = 0
+        media_messages = 0
 
         async for msg in tg.get_chat_history(
             chat.id,
             limit=5000
         ):
 
+            total_messages += 1
+
             try:
-                media = msg.video or msg.document
+
+                media = (
+                    msg.video
+                    or msg.document
+                    or msg.animation
+                )
 
                 if not media:
                     continue
 
-                filename = getattr(media, "file_name", None)
+                media_messages += 1
+
+                filename = getattr(
+                    media,
+                    "file_name",
+                    None
+                )
 
                 if not filename:
-                    continue
+
+                    mime = getattr(
+                        media,
+                        "mime_type",
+                        ""
+                    )
+
+                    ext = "mp4"
+
+                    if "mkv" in mime:
+                        ext = "mkv"
+
+                    elif "webm" in mime:
+                        ext = "webm"
+
+                    filename = f"telegram_{msg.id}.{ext}"
 
                 movie_id = (
                     filename
@@ -291,34 +324,36 @@ async def sync_movies():
                 current[movie_id] = {
                     "message_id": msg.id,
                     "file_name": filename,
-                    "file_size": media.file_size
+                    "file_size": getattr(
+                        media,
+                        "file_size",
+                        0
+                    )
                 }
 
-                # Cache message
                 MESSAGES_CACHE[movie_id] = msg
 
-                count += 1
-
-                if count % 100 == 0:
-                    print(f"✅ Synced: {count}")
+                print(f"✅ Added: {filename}")
 
             except Exception as inner_error:
+
                 print(
-                    f"⚠️ Skipped message {msg.id}: {inner_error}"
+                    f"⚠️ Skipped {msg.id}: {inner_error}"
                 )
-                continue
 
         save_movies(current)
 
         return {
             "status": "success",
+            "total_messages": total_messages,
+            "media_messages": media_messages,
             "synced": len(current),
             "messages_cached": len(MESSAGES_CACHE)
         }
 
     except Exception as e:
 
-        print(f"❌ Sync Error: {e}")
+        print("❌ Sync Error:", e)
 
         return JSONResponse(
             status_code=500,
@@ -328,14 +363,14 @@ async def sync_movies():
             }
         )
 
-# ---------------------------------------------------
+# ===================================================
 # MANIFEST
-# ---------------------------------------------------
+# ===================================================
 manifest = {
     "id": "org.arun.telegram",
-    "version": "17.0.0",
+    "version": "18.0.0",
     "name": "Telegram Movies",
-    "description": "Fast Telegram Seekable Streaming",
+    "description": "Telegram Seekable Streaming",
     "resources": [
         "catalog",
         "meta",
@@ -360,9 +395,9 @@ manifest = {
 async def get_manifest():
     return JSONResponse(manifest)
 
-# ---------------------------------------------------
+# ===================================================
 # CATALOG
-# ---------------------------------------------------
+# ===================================================
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
 
@@ -391,9 +426,9 @@ async def catalog():
         "metas": metas
     })
 
-# ---------------------------------------------------
+# ===================================================
 # META
-# ---------------------------------------------------
+# ===================================================
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
 
@@ -425,9 +460,9 @@ async def meta(id: str):
         }
     })
 
-# ---------------------------------------------------
+# ===================================================
 # STREAM
-# ---------------------------------------------------
+# ===================================================
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
 
@@ -448,6 +483,7 @@ async def stream(id: str):
     )
 
     try:
+
         msg = await get_message(
             clean_id,
             movie["message_id"]
@@ -470,7 +506,7 @@ async def stream(id: str):
 
     except Exception as e:
 
-        print(f"❌ Stream Error: {e}")
+        print("❌ Stream Error:", e)
 
         return JSONResponse({
             "streams": [
@@ -482,14 +518,17 @@ async def stream(id: str):
             ]
         })
 
-# ---------------------------------------------------
-# WATCH REDIRECT
-# ---------------------------------------------------
+# ===================================================
+# WATCH
+# ===================================================
 @app.api_route(
     "/watch/{movie_id}",
     methods=["GET", "HEAD"]
 )
-async def watch(movie_id: str, request: Request):
+async def watch(
+    movie_id: str,
+    request: Request
+):
 
     proxy_url = f"{BASE_URL}/proxy/{movie_id}"
 
@@ -506,9 +545,9 @@ async def watch(movie_id: str, request: Request):
         status_code=302
     )
 
-# ---------------------------------------------------
+# ===================================================
 # PROXY STREAM
-# ---------------------------------------------------
+# ===================================================
 @app.api_route(
     "/proxy/{movie_id}",
     methods=["GET", "HEAD"]
@@ -533,7 +572,11 @@ async def proxy_stream(
         movie["message_id"]
     )
 
-    media = msg.video or msg.document
+    media = (
+        msg.video
+        or msg.document
+        or msg.animation
+    )
 
     if not media:
         raise HTTPException(
@@ -548,10 +591,10 @@ async def proxy_stream(
 
     filename = movie.get(
         "file_name",
-        "video.mkv"
+        "video.mp4"
     ).lower()
 
-    # Content type
+    # Content Type
     content_type = "video/mp4"
 
     if filename.endswith(".mkv"):
@@ -562,6 +605,7 @@ async def proxy_stream(
 
     # HEAD
     if request.method == "HEAD":
+
         return Response(
             status_code=200,
             headers={
@@ -571,16 +615,18 @@ async def proxy_stream(
             }
         )
 
-    # ---------------------------------------------------
-    # RANGE PARSING
-    # ---------------------------------------------------
+    # ===================================================
+    # RANGE
+    # ===================================================
     range_header = request.headers.get("range")
 
     start = 0
     end = file_size - 1
 
     if range_header:
+
         try:
+
             bytes_range = (
                 range_header
                 .replace("bytes=", "")
@@ -602,12 +648,11 @@ async def proxy_stream(
     if end >= file_size:
         end = file_size - 1
 
-    # Telegram chunk size
     TG_CHUNK_SIZE = 1024 * 1024
 
-    # ---------------------------------------------------
+    # ===================================================
     # STREAMER
-    # ---------------------------------------------------
+    # ===================================================
     async def streamer():
 
         sent = 0
@@ -621,12 +666,12 @@ async def proxy_stream(
         async with STREAM_LIMITER:
 
             try:
+
                 async for chunk in tg.stream_media(
                     msg,
                     offset=chunk_offset
                 ):
 
-                    # Stop if disconnected
                     if await request.is_disconnected():
                         break
 
@@ -635,7 +680,8 @@ async def proxy_stream(
                         first_chunk = False
 
                     remaining = (
-                        (end - start + 1) - sent
+                        (end - start + 1)
+                        - sent
                     )
 
                     if remaining <= 0:
@@ -649,16 +695,20 @@ async def proxy_stream(
                     yield chunk
 
             except FloodWait as e:
+
                 print(
                     f"🚨 FloodWait: {e.value}s"
                 )
 
-            except Exception:
-                pass
+            except Exception as e:
 
-    # ---------------------------------------------------
+                print(
+                    f"❌ Stream Exception: {e}"
+                )
+
+    # ===================================================
     # HEADERS
-    # ---------------------------------------------------
+    # ===================================================
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {start}-{end}/{file_size}",
