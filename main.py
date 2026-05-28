@@ -28,14 +28,21 @@ API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 
 BASE_URL = os.getenv("BASE_URL", "")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
+
+# ⚡ CRITICAL FIX: Smart detection for Channel ID vs Username
+RAW_CHANNEL = os.getenv("CHANNEL_USERNAME", "")
+try:
+    # If it's a number (like -1003025930520), convert to int
+    TARGET_CHAT = int(RAW_CHANNEL)
+except ValueError:
+    # Otherwise, it's a username string (like @mychannel)
+    TARGET_CHAT = RAW_CHANNEL
 
 DB_FILE = "/app/data/movies.json"
 
 # ---------------------------------------------------
 # PYROGRAM CLIENT
 # ---------------------------------------------------
-# ⚡ CRITICAL CHANGE: Removed `no_updates=True` so the client can listen to new messages!
 tg = Client(
     "streamer",
     api_id=API_ID,
@@ -105,7 +112,7 @@ def save_movies(data):
 # ---------------------------------------------------
 # REAL-TIME SYNC (TRIGGERED ON NEW CHANNEL MESSAGE)
 # ---------------------------------------------------
-@tg.on_message(filters.chat(CHANNEL_USERNAME) & (filters.video | filters.document))
+@tg.on_message(filters.chat(TARGET_CHAT) & (filters.video | filters.document))
 async def on_new_movie(client, msg: Message):
     """Automatically adds new movies to the database the moment they are uploaded."""
     try:
@@ -152,7 +159,7 @@ async def get_message(
     msg = MESSAGES_CACHE.get(movie_id)
     if not msg:
         msg = await tg.get_messages(
-            CHANNEL_USERNAME,
+            TARGET_CHAT,
             message_id
         )
         MESSAGES_CACHE[movie_id] = msg
@@ -191,8 +198,8 @@ async def get_cdn_url(
 async def startup():
     await tg.start()
     try:
-        await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Pyrogram started + Listening for new movies...")
+        await tg.get_chat(TARGET_CHAT)
+        print(f"✅ Pyrogram started + Listening for new movies in {TARGET_CHAT}...")
     except Exception as e:
         print(f"⚠️ Warm-up warning: {e}")
 
@@ -215,7 +222,7 @@ async def home():
         "movies": len(movies),
         "cached_messages": len(MESSAGES_CACHE),
         "cached_urls": len(URL_CACHE),
-        "channel": CHANNEL_USERNAME
+        "channel": str(TARGET_CHAT)
     }
 
 # ---------------------------------------------------
@@ -228,7 +235,7 @@ async def manual_full_sync():
     try:
         current = {}
         print("🔄 Starting full manual sync...")
-        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
+        async for msg in tg.get_chat_history(TARGET_CHAT):
             try:
                 media = msg.video or msg.document
                 if not media:
@@ -283,7 +290,6 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-    # ⚡ No background tasks needed! The database is always 100% accurate now.
     movies = load_movies()
     metas = []
     
