@@ -19,6 +19,7 @@ import os
 import json
 import time
 import asyncio
+import re
 
 # ---------------------------------------------------
 # ENV VARIABLES
@@ -70,6 +71,39 @@ STREAM_LIMITER = asyncio.Semaphore(5)
 # URL TTL
 # ---------------------------------------------------
 URL_TTL = 3000
+
+
+# ---------------------------------------------------
+# QUALITY HELPERS
+# ---------------------------------------------------
+def format_size(size):
+    if not size:
+        return "Unknown"
+    size = float(size)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
+
+def detect_quality(filename):
+    if not filename:
+        return "Unknown"
+    name = filename.lower()
+    for p in ["2160p","4k","1440p","1080p","720p","480p","360p"]:
+        if p in name:
+            return p.upper()
+    return "Unknown"
+
+def detect_source(filename):
+    if not filename:
+        return ""
+    name = filename.lower()
+    for s in ["bluray","bdrip","web-dl","webdl","webrip","hdrip","dvdrip","hdtv","remux"]:
+        if s in name:
+            return s.upper()
+    return ""
+
 
 # ---------------------------------------------------
 # DATABASE FUNCTIONS
@@ -215,10 +249,16 @@ async def sync_movies():
                     .lower()
                 )
 
+                quality = detect_quality(filename)
+                source = detect_source(filename)
+
                 current[movie_id] = {
                     "message_id": msg.id,
                     "file_name": filename,
-                    "file_size": media.file_size
+                    "file_size": media.file_size,
+                    "file_size_text": format_size(media.file_size),
+                    "quality": quality,
+                    "source": source
                 }
 
             except Exception as inner_error:
