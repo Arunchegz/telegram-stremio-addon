@@ -184,13 +184,19 @@ async def get_cdn_url(
 async def auto_sync():
     global LAST_SYNC
 
+    print("📚 AUTO_SYNC CALLED")
+
     if time.time() - LAST_SYNC < SYNC_INTERVAL:
+        print("✅ USING CACHE")
         return
 
     async with SYNC_LOCK:
 
         if time.time() - LAST_SYNC < SYNC_INTERVAL:
+            print("✅ USING CACHE (LOCK)")
             return
+
+        print("🔄 STARTING TELEGRAM SYNC")
 
         current = {}
 
@@ -205,6 +211,8 @@ async def auto_sync():
 
                 if not filename:
                     continue
+
+                print(f"📥 {filename}")
 
                 movie_id = (
                     filename
@@ -230,6 +238,7 @@ async def auto_sync():
 
         save_movies(current)
         LAST_SYNC = time.time()
+        print(f"✅ SYNC COMPLETE: {len(current)} MOVIES")
 
 # ---------------------------------------------------
 # STARTUP
@@ -330,6 +339,21 @@ async def sync_movies():
     except Exception as e:
         return {"error": str(e)}
 
+
+# ---------------------------------------------------
+# DEBUG
+# ---------------------------------------------------
+@app.get("/debug")
+async def debug():
+    movies = load_movies()
+
+    return {
+        "movies": len(movies),
+        "last_sync": LAST_SYNC,
+        "cache_age": int(time.time() - LAST_SYNC) if LAST_SYNC else 0,
+        "channel": CHANNEL_USERNAME
+    }
+
 # ---------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------
@@ -359,8 +383,10 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
+    print("🎬 CATALOG REQUEST")
     await auto_sync()
     movies = load_movies()
+    print(f"📁 MOVIES IN DB: {len(movies)}")
     metas = []
     for movie_id, movie in movies.items():
         movie_name = movie.get("file_name", "Unknown Movie")
@@ -370,11 +396,7 @@ async def catalog():
             "name": movie_name,
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
-            "description": (
-                f"{movie.get('quality','')} "
-                f"{movie.get('source','')} | "
-                f"{movie.get('file_size_text','')}"
-            ),
+            "description": movie_name,
             "posterShape": "poster"
         })
     return JSONResponse({"metas": metas})
@@ -399,11 +421,7 @@ async def meta(id: str):
             "name": movie_name,
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
-            "description": (
-                f"{movie.get('quality','')} "
-                f"{movie.get('source','')} | "
-                f"{movie.get('file_size_text','')}"
-            ),
+            "description": movie_name,
             "posterShape": "poster"
         }
     })
@@ -414,47 +432,33 @@ async def meta(id: str):
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
     clean_id = id.replace("tg:", "")
-
     movies = load_movies()
-
-    print(f"🎬 Stream Request: {clean_id}")
-
     movie = movies.get(clean_id)
 
     if not movie:
-        print(f"❌ Movie Not Found: {clean_id}")
         return JSONResponse({"streams": []})
 
-    quality = movie.get("quality", "Unknown")
-    source = movie.get("source", "")
-    size = movie.get("file_size_text", "")
     movie_name = movie.get("file_name", "Unknown Movie")
-
-    print(f"✅ Found Movie: {movie_name}")
 
     try:
         msg = await get_message(movie["message_id"])
         cdn_url = await get_cdn_url(clean_id, msg)
-
         return JSONResponse({
             "streams": [
                 {
-                    "name": f"⚡ {quality} • {size}",
-                    "title": source or movie_name,
+                    "name": "⚡ Telegram CDN",
+                    "title": movie_name,
                     "url": cdn_url
                 }
             ]
         })
-
     except Exception as e:
-
         print(f"❌ Stream URL Error: {e}")
-
         return JSONResponse({
             "streams": [
                 {
-                    "name": f"☁️ {quality} • {size}",
-                    "title": source or movie_name,
+                    "name": "☁️ Telegram Proxy",
+                    "title": movie_name,
                     "url": f"{BASE_URL}/proxy/{clean_id}"
                 }
             ]
