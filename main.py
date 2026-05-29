@@ -64,17 +64,14 @@ app.add_middleware(
 MOVIES_CACHE = {}
 URL_CACHE = {}
 
-# ⚡ POINT 1: Increased to 5 to allow video players to probe metadata without deadlocking
+# Allow video players to probe metadata without deadlocking
 STREAM_LIMITER = asyncio.Semaphore(5)
 
 # ---------------------------------------------------
 # URL TTL
 # ---------------------------------------------------
 URL_TTL = 3000
-
 SYNC_LOCK = asyncio.Lock()
-LAST_SYNC = 0
-SYNC_INTERVAL = 300
 
 
 # ---------------------------------------------------
@@ -139,7 +136,6 @@ def save_movies(data):
     except Exception as e:
         print("DB Save Error:", e)
 
-# ⚡ NEW: Helper function to scrub deleted records
 def remove_movie_from_db(movie_id: str):
     global MOVIES_CACHE
     if movie_id in MOVIES_CACHE:
@@ -147,25 +143,18 @@ def remove_movie_from_db(movie_id: str):
         save_movies(MOVIES_CACHE)
         print(f"🗑️ Removed deleted Telegram media from DB: {movie_id}")
 
+
 # ---------------------------------------------------
 # GET CACHED MESSAGE
 # ---------------------------------------------------
-async def get_message(
-    message_id: int
-) -> Message:
-    return await tg.get_messages(
-        CHANNEL_USERNAME,
-        message_id
-    )
+async def get_message(message_id: int) -> Message:
+    return await tg.get_messages(CHANNEL_USERNAME, message_id)
 
 
 # ---------------------------------------------------
 # GET CDN URL
 # ---------------------------------------------------
-async def get_cdn_url(
-    movie_id: str,
-    msg: Message
-) -> str:
+async def get_cdn_url(movie_id: str, msg: Message) -> str:
     cached = URL_CACHE.get(movie_id)
     # Cache hit
     if cached and time.time() < cached["expires"]:
@@ -187,40 +176,24 @@ async def get_cdn_url(
 
 
 # ---------------------------------------------------
-# AUTO SYNC
+# INSTANT AUTO SYNC (NO TIMER)
 # ---------------------------------------------------
 async def auto_sync():
-    global LAST_SYNC
-
-    print("📚 AUTO_SYNC CALLED")
-
-    if time.time() - LAST_SYNC < SYNC_INTERVAL:
-        print("✅ USING CACHE")
-        return
+    print("📚 AUTO_SYNC CALLED (INSTANT)")
 
     async with SYNC_LOCK:
-
-        if time.time() - LAST_SYNC < SYNC_INTERVAL:
-            print("✅ USING CACHE (LOCK)")
-            return
-
         print("🔄 STARTING TELEGRAM SYNC")
-
         current = {}
 
         async for msg in tg.get_chat_history(CHANNEL_USERNAME):
             try:
                 media = msg.video or msg.document
-
                 if not media:
                     continue
 
                 filename = getattr(media, "file_name", None)
-
                 if not filename:
                     continue
-
-                print(f"📥 {filename}")
 
                 movie_id = (
                     filename
@@ -245,25 +218,21 @@ async def auto_sync():
                 continue
 
         save_movies(current)
-        LAST_SYNC = time.time()
-        print(f"✅ SYNC COMPLETE: {len(current)} MOVIES")
+        print(f"✅ INSTANT SYNC COMPLETE: {len(current)} MOVIES")
 
 
 # ---------------------------------------------------
-# SHARED SYNC
+# SHARED SYNC (MANUAL OVERRIDE)
 # ---------------------------------------------------
 async def sync_channel():
     current = {}
-
     async for msg in tg.get_chat_history(CHANNEL_USERNAME):
         try:
             media = msg.video or msg.document
-
             if not media:
                 continue
 
             filename = getattr(media, "file_name", None)
-
             if not filename:
                 continue
 
@@ -290,7 +259,7 @@ async def sync_channel():
             continue
 
     save_movies(current)
-    print(f"✅ SYNC COMPLETE: {len(current)} MOVIES")
+    print(f"✅ MANUAL SYNC COMPLETE: {len(current)} MOVIES")
 
 
 # ---------------------------------------------------
@@ -356,11 +325,8 @@ async def sync_movies():
 @app.get("/debug")
 async def debug():
     movies = load_movies()
-
     return {
         "movies": len(movies),
-        "last_sync": LAST_SYNC,
-        "cache_age": int(time.time() - LAST_SYNC) if LAST_SYNC else 0,
         "channel": CHANNEL_USERNAME
     }
 
@@ -395,7 +361,7 @@ async def get_manifest():
 async def catalog():
     print("🎬 CATALOG REQUEST")
     
-    # ⚡ FIX 1: Run auto_sync so the DB actually updates when things are deleted
+    # Always fetch latest data from Telegram
     await auto_sync()
     
     movies = load_movies()
@@ -414,7 +380,7 @@ async def catalog():
             "posterShape": "poster"
         })
         
-    # ⚡ FIX 2: Tell Stremio NOT to cache this response so deletes show up instantly
+    # Prevent Stremio from caching deleted items
     return JSONResponse(
         content={"metas": metas},
         headers={
@@ -464,8 +430,7 @@ async def stream(id: str):
     try:
         msg = await get_message(movie["message_id"])
         
-        # ⚡ NEW: Dynamic Deletion Check
-        # Pyrogram sets `msg.empty = True` if the message was deleted from the channel
+        # Dynamic Deletion Check
         if getattr(msg, "empty", False) or not (getattr(msg, "video", None) or getattr(msg, "document", None)):
             remove_movie_from_db(clean_id)
             return JSONResponse({"streams": []})
@@ -527,7 +492,7 @@ async def proxy_stream(movie_id: str, request: Request):
 
     msg = await get_message(movie["message_id"])
     
-    # ⚡ NEW: Dynamic Deletion Check for the proxy
+    # Dynamic Deletion Check for the proxy
     if getattr(msg, "empty", False) or not (getattr(msg, "video", None) or getattr(msg, "document", None)):
         remove_movie_from_db(movie_id)
         raise HTTPException(status_code=404, detail="Media deleted from Telegram channel")
@@ -588,7 +553,7 @@ async def proxy_stream(movie_id: str, request: Request):
         chunk_offset = start // TG_CHUNK_SIZE
         skip_bytes = start % TG_CHUNK_SIZE
 
-        # ⚡ POINT 2: Calculate exactly how many 1MB chunks we need from Telegram
+        # Calculate exactly how many 1MB chunks we need from Telegram
         bytes_to_fetch = (end - start + 1) + skip_bytes
         chunks_to_fetch = (bytes_to_fetch + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
 
@@ -598,7 +563,7 @@ async def proxy_stream(movie_id: str, request: Request):
                 async for chunk in tg.stream_media(
                     msg,
                     offset=chunk_offset,
-                    limit=chunks_to_fetch  # ⚡ POINT 2: Added limit parameter here
+                    limit=chunks_to_fetch
                 ):
                     # Kill stream immediately if user skipped forward
                     if await request.is_disconnected():
