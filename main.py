@@ -139,6 +139,14 @@ def save_movies(data):
     except Exception as e:
         print("DB Save Error:", e)
 
+# ⚡ NEW: Helper function to scrub deleted records
+def remove_movie_from_db(movie_id: str):
+    global MOVIES_CACHE
+    if movie_id in MOVIES_CACHE:
+        del MOVIES_CACHE[movie_id]
+        save_movies(MOVIES_CACHE)
+        print(f"🗑️ Removed deleted Telegram media from DB: {movie_id}")
+
 # ---------------------------------------------------
 # GET CACHED MESSAGE
 # ---------------------------------------------------
@@ -448,6 +456,13 @@ async def stream(id: str):
 
     try:
         msg = await get_message(movie["message_id"])
+        
+        # ⚡ NEW: Dynamic Deletion Check
+        # Pyrogram sets `msg.empty = True` if the message was deleted from the channel
+        if getattr(msg, "empty", False) or not (getattr(msg, "video", None) or getattr(msg, "document", None)):
+            remove_movie_from_db(clean_id)
+            return JSONResponse({"streams": []})
+
         cdn_url = await get_cdn_url(clean_id, msg)
         return JSONResponse({
             "streams": [
@@ -501,13 +516,16 @@ async def proxy_stream(movie_id: str, request: Request):
     movie = movies.get(movie_id)
 
     if not movie:
-        raise HTTPException(status_code=404, detail="Movie not found")
+        raise HTTPException(status_code=404, detail="Movie not found in database")
 
     msg = await get_message(movie["message_id"])
-    media = msg.video or msg.document
+    
+    # ⚡ NEW: Dynamic Deletion Check for the proxy
+    if getattr(msg, "empty", False) or not (getattr(msg, "video", None) or getattr(msg, "document", None)):
+        remove_movie_from_db(movie_id)
+        raise HTTPException(status_code=404, detail="Media deleted from Telegram channel")
 
-    if not media:
-        raise HTTPException(status_code=404, detail="Media not found")
+    media = msg.video or msg.document
 
     file_size = movie.get("file_size", media.file_size)
     filename = movie.get("file_name", "video.mkv").lower()
