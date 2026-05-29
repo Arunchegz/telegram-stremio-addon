@@ -425,7 +425,15 @@ async def stream(id: str):
     if not movie:
         return JSONResponse({"streams": []})
 
+    # Pull details from the database
     movie_name = movie.get("file_name", "Unknown Movie")
+    quality = movie.get("quality", "Unknown")
+    size = movie.get("file_size_text", "Unknown")
+    source = movie.get("source", "")
+    
+    # ⚡ NEW: Format the Stremio button text using newlines (\n)
+    source_text = f" | 🏷️ {source}" if source else ""
+    stream_title = f"{movie_name}\n⚙️ {quality}{source_text} | 💾 {size}"
 
     try:
         msg = await get_message(movie["message_id"])
@@ -440,7 +448,7 @@ async def stream(id: str):
             "streams": [
                 {
                     "name": "⚡ Telegram CDN",
-                    "title": movie_name,
+                    "title": stream_title,
                     "url": cdn_url
                 }
             ]
@@ -451,12 +459,11 @@ async def stream(id: str):
             "streams": [
                 {
                     "name": "☁️ Telegram Proxy",
-                    "title": movie_name,
+                    "title": stream_title,
                     "url": f"{BASE_URL}/proxy/{clean_id}"
                 }
             ]
         })
-
 # ---------------------------------------------------
 # WATCH REDIRECT
 # ---------------------------------------------------
