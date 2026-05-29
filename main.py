@@ -64,8 +64,8 @@ MOVIES_CACHE = {}
 MESSAGES_CACHE = {}
 URL_CACHE = {}
 
-# ⚡ CRITICAL: Limits parallel DC authorizations to prevent FloodWaits
-STREAM_LIMITER = asyncio.Semaphore(2)
+# ⚡ POINT 1: Increased to 5 to allow video players to probe metadata without deadlocking
+STREAM_LIMITER = asyncio.Semaphore(5)
 
 # ---------------------------------------------------
 # URL TTL
@@ -445,14 +445,19 @@ async def proxy_stream(movie_id: str, request: Request):
         chunk_offset = start // TG_CHUNK_SIZE
         skip_bytes = start % TG_CHUNK_SIZE
 
-        # ⚡ CRITICAL: Stops Stremio from spamming Telegram with 6 parallel requests
+        # ⚡ POINT 2: Calculate exactly how many 1MB chunks we need from Telegram
+        bytes_to_fetch = (end - start + 1) + skip_bytes
+        chunks_to_fetch = (bytes_to_fetch + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
+
+        # Prevents parallel DC connection flooding
         async with STREAM_LIMITER:
             try:
                 async for chunk in tg.stream_media(
                     msg,
-                    offset=chunk_offset
+                    offset=chunk_offset,
+                    limit=chunks_to_fetch  # ⚡ POINT 2: Added limit parameter here
                 ):
-                    # ⚡ CRITICAL: Kill stream immediately if user skipped forward
+                    # Kill stream immediately if user skipped forward
                     if await request.is_disconnected():
                         break
 
