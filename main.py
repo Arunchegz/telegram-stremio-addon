@@ -370,7 +370,11 @@ async def catalog():
             "name": movie_name,
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
-            "description": movie_name,
+            "description": (
+                f"{movie.get('quality','')} "
+                f"{movie.get('source','')} | "
+                f"{movie.get('file_size_text','')}"
+            ),
             "posterShape": "poster"
         })
     return JSONResponse({"metas": metas})
@@ -395,7 +399,11 @@ async def meta(id: str):
             "name": movie_name,
             "poster": "https://placehold.co/300x450?text=Telegram",
             "background": "https://placehold.co/1280x720?text=Telegram",
-            "description": movie_name,
+            "description": (
+                f"{movie.get('quality','')} "
+                f"{movie.get('source','')} | "
+                f"{movie.get('file_size_text','')}"
+            ),
             "posterShape": "poster"
         }
     })
@@ -406,17 +414,28 @@ async def meta(id: str):
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
     clean_id = id.replace("tg:", "")
+
     movies = load_movies()
+
+    print(f"🎬 Stream Request: {clean_id}")
+
     movie = movies.get(clean_id)
 
     if not movie:
+        print(f"❌ Movie Not Found: {clean_id}")
         return JSONResponse({"streams": []})
 
+    quality = movie.get("quality", "Unknown")
+    source = movie.get("source", "")
+    size = movie.get("file_size_text", "")
     movie_name = movie.get("file_name", "Unknown Movie")
+
+    print(f"✅ Found Movie: {movie_name}")
 
     try:
         msg = await get_message(movie["message_id"])
         cdn_url = await get_cdn_url(clean_id, msg)
+
         return JSONResponse({
             "streams": [
                 {
@@ -426,8 +445,11 @@ async def stream(id: str):
                 }
             ]
         })
+
     except Exception as e:
+
         print(f"❌ Stream URL Error: {e}")
+
         return JSONResponse({
             "streams": [
                 {
