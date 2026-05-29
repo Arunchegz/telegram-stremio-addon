@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, BadRequest
 
 import os
 import json
@@ -61,7 +61,6 @@ app.add_middleware(
 # MEMORY CACHE & LIMITS
 # ---------------------------------------------------
 MOVIES_CACHE = {}
-MESSAGES_CACHE = {}
 URL_CACHE = {}
 
 # ⚡ POINT 1: Increased to 5 to allow video players to probe metadata without deadlocking
@@ -106,17 +105,13 @@ def save_movies(data):
 # GET CACHED MESSAGE
 # ---------------------------------------------------
 async def get_message(
-    movie_id: str,
     message_id: int
 ) -> Message:
-    msg = MESSAGES_CACHE.get(movie_id)
-    if not msg:
-        msg = await tg.get_messages(
-            CHANNEL_USERNAME,
-            message_id
-        )
-        MESSAGES_CACHE[movie_id] = msg
-    return msg
+    return await tg.get_messages(
+        CHANNEL_USERNAME,
+        message_id
+    )
+
 
 # ---------------------------------------------------
 # GET CDN URL
@@ -173,7 +168,6 @@ async def home():
     return {
         "status": "running",
         "movies": len(movies),
-        "cached_messages": len(MESSAGES_CACHE),
         "cached_urls": len(URL_CACHE),
         "channel": CHANNEL_USERNAME
     }
@@ -184,13 +178,11 @@ async def home():
 @app.get("/reset")
 async def reset():
     global MOVIES_CACHE
-    global MESSAGES_CACHE
     global URL_CACHE
     try:
         if os.path.exists(DB_FILE):
             os.remove(DB_FILE)
         MOVIES_CACHE = {}
-        MESSAGES_CACHE = {}
         URL_CACHE = {}
         return {"status": "database deleted"}
     except Exception as e:
@@ -201,7 +193,6 @@ async def reset():
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
-    global MESSAGES_CACHE
     try:
         current = {}
         chat = await tg.get_chat(CHANNEL_USERNAME)
@@ -230,17 +221,13 @@ async def sync_movies():
                     "file_size": media.file_size
                 }
 
-                # Pre-cache messages
-                MESSAGES_CACHE[movie_id] = msg
-
             except Exception as inner_error:
                 print("Skipped Message:", inner_error)
                 continue
 
         save_movies(current)
         return {
-            "synced": len(current),
-            "messages_cached": len(MESSAGES_CACHE)
+            "synced": len(current)
         }
     except Exception as e:
         return {"error": str(e)}
@@ -329,7 +316,7 @@ async def stream(id: str):
     movie_name = movie.get("file_name", "Unknown Movie")
 
     try:
-        msg = await get_message(clean_id, movie["message_id"])
+        msg = await get_message(movie["message_id"])
         cdn_url = await get_cdn_url(clean_id, msg)
         return JSONResponse({
             "streams": [
@@ -385,7 +372,7 @@ async def proxy_stream(movie_id: str, request: Request):
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
 
-    msg = await get_message(movie_id, movie["message_id"])
+    msg = await get_message(movie["message_id"])
     media = msg.video or msg.document
 
     if not media:
