@@ -420,8 +420,8 @@ async def stream(id: str):
         return JSONResponse({
             "streams": [
                 {
-                    "name": "⚡ Telegram CDN",
-                    "title": movie_name,
+                    "name": f"⚡ {quality} • {size}",
+                    "title": source or movie_name,
                     "url": cdn_url
                 }
             ]
@@ -431,8 +431,8 @@ async def stream(id: str):
         return JSONResponse({
             "streams": [
                 {
-                    "name": "☁️ Telegram Proxy",
-                    "title": movie_name,
+                    "name": f"☁️ {quality} • {size}",
+                    "title": source or movie_name,
                     "url": f"{BASE_URL}/proxy/{clean_id}"
                 }
             ]
