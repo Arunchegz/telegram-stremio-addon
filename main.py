@@ -72,6 +72,10 @@ STREAM_LIMITER = asyncio.Semaphore(5)
 # ---------------------------------------------------
 URL_TTL = 3000
 
+SYNC_LOCK = asyncio.Lock()
+LAST_SYNC = 0
+SYNC_INTERVAL = 300
+
 
 # ---------------------------------------------------
 # QUALITY HELPERS
@@ -172,6 +176,60 @@ async def get_cdn_url(
     }
     print(f"🔗 Generated Proxy URL: {movie_id}")
     return url
+
+
+# ---------------------------------------------------
+# AUTO SYNC
+# ---------------------------------------------------
+async def auto_sync():
+    global LAST_SYNC
+
+    if time.time() - LAST_SYNC < SYNC_INTERVAL:
+        return
+
+    async with SYNC_LOCK:
+
+        if time.time() - LAST_SYNC < SYNC_INTERVAL:
+            return
+
+        current = {}
+
+        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
+            try:
+                media = msg.video or msg.document
+
+                if not media:
+                    continue
+
+                filename = getattr(media, "file_name", None)
+
+                if not filename:
+                    continue
+
+                movie_id = (
+                    filename
+                    .replace(" ", "_")
+                    .replace(".", "_")
+                    .lower()
+                )
+
+                quality = detect_quality(filename)
+                source = detect_source(filename)
+
+                current[movie_id] = {
+                    "message_id": msg.id,
+                    "file_name": filename,
+                    "file_size": media.file_size,
+                    "file_size_text": format_size(media.file_size),
+                    "quality": quality,
+                    "source": source
+                }
+
+            except Exception:
+                continue
+
+        save_movies(current)
+        LAST_SYNC = time.time()
 
 # ---------------------------------------------------
 # STARTUP
@@ -301,6 +359,7 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
+    await auto_sync()
     movies = load_movies()
     metas = []
     for movie_id, movie in movies.items():
