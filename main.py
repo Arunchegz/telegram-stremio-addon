@@ -240,6 +240,51 @@ async def auto_sync():
         LAST_SYNC = time.time()
         print(f"✅ SYNC COMPLETE: {len(current)} MOVIES")
 
+
+# ---------------------------------------------------
+# SHARED SYNC
+# ---------------------------------------------------
+async def sync_channel():
+    current = {}
+
+    async for msg in tg.get_chat_history(CHANNEL_USERNAME):
+        try:
+            media = msg.video or msg.document
+
+            if not media:
+                continue
+
+            filename = getattr(media, "file_name", None)
+
+            if not filename:
+                continue
+
+            movie_id = (
+                filename
+                .replace(" ", "_")
+                .replace(".", "_")
+                .lower()
+            )
+
+            quality = detect_quality(filename)
+            source = detect_source(filename)
+
+            current[movie_id] = {
+                "message_id": msg.id,
+                "file_name": filename,
+                "file_size": media.file_size,
+                "file_size_text": format_size(media.file_size),
+                "quality": quality,
+                "source": source
+            }
+
+        except Exception:
+            continue
+
+    save_movies(current)
+    print(f"✅ SYNC COMPLETE: {len(current)} MOVIES")
+
+
 # ---------------------------------------------------
 # STARTUP
 # ---------------------------------------------------
@@ -294,51 +339,8 @@ async def reset():
 # ---------------------------------------------------
 @app.get("/sync")
 async def sync_movies():
-    try:
-        current = {}
-        chat = await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Channel:", chat.title)
-
-        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
-            try:
-                media = msg.video or msg.document
-                if not media:
-                    continue
-
-                filename = getattr(media, "file_name", None)
-                if not filename:
-                    continue
-
-                movie_id = (
-                    filename
-                    .replace(" ", "_")
-                    .replace(".", "_")
-                    .lower()
-                )
-
-                quality = detect_quality(filename)
-                source = detect_source(filename)
-
-                current[movie_id] = {
-                    "message_id": msg.id,
-                    "file_name": filename,
-                    "file_size": media.file_size,
-                    "file_size_text": format_size(media.file_size),
-                    "quality": quality,
-                    "source": source
-                }
-
-            except Exception as inner_error:
-                print("Skipped Message:", inner_error)
-                continue
-
-        save_movies(current)
-        return {
-            "synced": len(current)
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
+    await sync_channel()
+    return {"status": "ok", "movies": len(load_movies())}
 
 # ---------------------------------------------------
 # DEBUG
@@ -384,8 +386,12 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
     print("🎬 CATALOG REQUEST")
-    await auto_sync()
     movies = load_movies()
+
+    if not movies:
+        print("📚 Database empty -> syncing Telegram")
+        await sync_channel()
+        movies = load_movies()
     print(f"📁 MOVIES IN DB: {len(movies)}")
     metas = []
     for movie_id, movie in movies.items():
