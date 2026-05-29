@@ -99,43 +99,6 @@ def detect_quality(filename):
             return p.upper()
     return "Unknown"
 
-
-def detect_codec(filename):
-    if not filename:
-        return ""
-
-    name = filename.lower()
-
-    if "x265" in name or "hevc" in name:
-        return "HEVC/x265"
-
-    if "x264" in name or "avc" in name:
-        return "AVC/x264"
-
-    return ""
-
-
-def detect_hdr(filename):
-    if not filename:
-        return ""
-
-    name = filename.lower()
-
-    if "dolby.vision" in name or "dolby vision" in name or ".dv." in name:
-        return "Dolby Vision"
-
-    if "hdr10+" in name:
-        return "HDR10+"
-
-    if "hdr10" in name:
-        return "HDR10"
-
-    if "hdr" in name:
-        return "HDR"
-
-    return ""
-
-
 def detect_source(filename):
     if not filename:
         return ""
@@ -260,8 +223,6 @@ async def auto_sync():
 
                 quality = detect_quality(filename)
                 source = detect_source(filename)
-                codec = detect_codec(filename)
-                hdr = detect_hdr(filename)
 
                 current[movie_id] = {
                     "message_id": msg.id,
@@ -269,9 +230,7 @@ async def auto_sync():
                     "file_size": media.file_size,
                     "file_size_text": format_size(media.file_size),
                     "quality": quality,
-                    "source": source,
-                    "codec": codec,
-                    "hdr": hdr
+                    "source": source
                 }
 
             except Exception:
@@ -359,8 +318,6 @@ async def sync_movies():
 
                 quality = detect_quality(filename)
                 source = detect_source(filename)
-                codec = detect_codec(filename)
-                hdr = detect_hdr(filename)
 
                 current[movie_id] = {
                     "message_id": msg.id,
@@ -368,9 +325,7 @@ async def sync_movies():
                     "file_size": media.file_size,
                     "file_size_text": format_size(media.file_size),
                     "quality": quality,
-                    "source": source,
-                    "codec": codec,
-                    "hdr": hdr
+                    "source": source
                 }
 
             except Exception as inner_error:
