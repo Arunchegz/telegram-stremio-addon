@@ -51,7 +51,7 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(5)   # limit parallel Telegram DC connections
+BACKGROUND_TASKS = set()
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
@@ -219,6 +219,15 @@ async def sync_channel() -> int:
         print(f"✅ Sync complete: {len(current)} movies")
         return len(current)
 
+async def periodic_sync():
+    """Background task to sync the channel periodically."""
+    while True:
+        try:
+            await sync_channel()
+        except Exception as e:
+            print(f"⚠️ Periodic sync error: {e}")
+        await asyncio.sleep(900)  # Run every 15 minutes
+
 
 # ---------------------------------------------------
 # LIFECYCLE
@@ -231,6 +240,11 @@ async def startup():
         print("✅ Pyrogram started")
     except Exception as e:
         print(f"⚠️  Startup warning: {e}")
+    
+    # Start the background sync task
+    sync_task = asyncio.create_task(periodic_sync())
+    BACKGROUND_TASKS.add(sync_task)
+    sync_task.add_done_callback(BACKGROUND_TASKS.discard)
 
 
 @app.on_event("shutdown")
@@ -293,7 +307,7 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-    await sync_channel()          # always refresh before serving
+    # Fetch from cache instead of blocking the event loop on every request
     movies = load_movies()
 
     metas = [
@@ -481,39 +495,59 @@ async def proxy_stream(movie_id: str, request: Request):
     chunks_needed = (bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
 
     async def streamer():
-        sent       = 0
-        first      = True
+        sent = 0
+        first = True
         total_want = end - start + 1
+        
+        # Buffer up to 10 chunks (~10 MB) in memory
+        queue = asyncio.Queue(maxsize=10)  
 
-        async with STREAM_LIMITER:
+        async def fetch_from_telegram():
             try:
                 async for chunk in tg.stream_media(
-                    msg,
-                    offset=chunk_offset,
-                    limit=chunks_needed,
+                    msg, 
+                    offset=chunk_offset, 
+                    limit=chunks_needed
                 ):
-                    if await request.is_disconnected():
-                        break
-
-                    if first:
-                        chunk = chunk[skip_bytes:]
-                        first = False
-
-                    remaining = total_want - sent
-                    if remaining <= 0:
-                        break
-
-                    if len(chunk) > remaining:
-                        chunk = chunk[:remaining]
-
-                    sent += len(chunk)
-                    yield chunk
-
+                    await queue.put(chunk)
+                await queue.put(None)  # EOF marker
             except FloodWait as e:
-                print(f"🚨 FloodWait: {e.value}s — backing off")
+                print(f"🚨 FloodWait: {e.value}s")
                 await asyncio.sleep(e.value)
-            except Exception:
-                pass   # client disconnect or Telegram hiccup — exit cleanly
+                await queue.put(None)
+            except Exception as e:
+                await queue.put(e)
+
+        # Start background pre-fetching
+        fetch_task = asyncio.create_task(fetch_from_telegram())
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                chunk = await queue.get()
+                
+                if chunk is None:
+                    break
+                if isinstance(chunk, Exception):
+                    break
+
+                if first:
+                    chunk = chunk[skip_bytes:]
+                    first = False
+
+                remaining = total_want - sent
+                if remaining <= 0:
+                    break
+
+                if len(chunk) > remaining:
+                    chunk = chunk[:remaining]
+
+                sent += len(chunk)
+                yield chunk
+        finally:
+            fetch_task.cancel()
 
     return StreamingResponse(
         streamer(),
