@@ -8,6 +8,8 @@ from pyrogram.errors import FloodWait
 import os
 import json
 import asyncio
+import re
+import requests
 
 # ---------------------------------------------------
 # ENV
@@ -54,7 +56,7 @@ STREAM_LIMITER = asyncio.Semaphore(5)   # limit parallel Telegram DC connections
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
 # ---------------------------------------------------
-# HELPERS
+# HELPERS (Formatting & Pyrogram)
 # ---------------------------------------------------
 def format_size(size) -> str:
     if not size:
@@ -94,6 +96,45 @@ def content_type_for(filename: str) -> str:
     if name.endswith(".webm"):
         return "video/webm"
     return "video/mp4"
+
+# ---------------------------------------------------
+# HELPERS (IMDb Matching & String parsing)
+# ---------------------------------------------------
+def normalize(text: str):
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def flexible_match(title: str, filename: str):
+    title_n = normalize(title)
+    file_n = normalize(filename)
+    words = title_n.split()
+    
+    if not words:
+        return False
+
+    matched = sum(1 for w in words if w in file_n)
+
+    if len(words) <= 2:
+        required = len(words)
+    else:
+        required = max(2, len(words) // 2)
+
+    return matched >= required
+
+
+def get_cinemeta(type_name: str, imdb_id: str):
+    url = f"https://v3-cinemeta.strem.io/meta/{type_name}/{imdb_id}.json"
+    try:
+        r = requests.get(url, timeout=10)
+        meta = r.json().get("meta", {})
+        return (
+            meta.get("name", ""),
+            str(meta.get("year", ""))
+        )
+    except Exception:
+        return ("", "")
 
 
 # ---------------------------------------------------
@@ -235,7 +276,7 @@ MANIFEST = {
     "description": "Seekable Telegram streaming via Pyrogram",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
-    "idPrefixes": ["tg"],
+    "idPrefixes": ["tg", "tt"],  # Added 'tt' for IMDb matching
     "catalogs": [
         {"type": "movie", "id": "telegrammovies", "name": "Telegram Movies"}
     ],
@@ -279,6 +320,20 @@ async def catalog():
 # ---------------------------------------------------
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
+    # Handle IMDb requests
+    if id.startswith("tt"):
+        title, year = get_cinemeta("movie", id)
+        return JSONResponse({
+            "meta": {
+                "id": id,
+                "type": "movie",
+                "name": title,
+                "year": year,
+                "poster": "https://placehold.co/300x450?text=Telegram",
+            }
+        })
+
+    # Handle internal Telegram Catalog requests
     clean_id = id.removeprefix("tg:")
     movie = load_movies().get(clean_id)
     if not movie:
@@ -303,8 +358,47 @@ async def meta(id: str):
 # ---------------------------------------------------
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
+    movies = load_movies()
+    
+    # ---------------------------------------------------
+    # IMDb Matcher (Discover Page)
+    # ---------------------------------------------------
+    if id.startswith("tt"):
+        movie_title, movie_year = get_cinemeta("movie", id)
+        if not movie_title:
+            return JSONResponse({"streams": []})
+
+        streams = []
+        for mid, m in movies.items():
+            name = m.get("file_name", "")
+            
+            if not flexible_match(movie_title, name):
+                continue
+            
+            # Year validation
+            if movie_year and movie_year not in name:
+                continue
+
+            quality = m.get("quality", "Unknown")
+            size    = m.get("file_size_text", "Unknown")
+            source  = m.get("source", "")
+            src_tag = f" | 🏷️ {source}" if source else ""
+            title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
+
+            streams.append({
+                "name":  "⚡ Telegram",
+                "title": title,
+                "url":   f"{BASE_URL}/proxy/{mid}",
+            })
+            
+        return JSONResponse({"streams": streams})
+
+
+    # ---------------------------------------------------
+    # Internal Catalog Streamer (Telegram Addon Page)
+    # ---------------------------------------------------
     clean_id = id.removeprefix("tg:")
-    movie = load_movies().get(clean_id)
+    movie = movies.get(clean_id)
     if not movie:
         return JSONResponse({"streams": []})
 
@@ -433,3 +527,6 @@ async def proxy_stream(movie_id: str, request: Request):
             "Connection":     "keep-alive",
         },
     )
+
+# Required by Vercel
+application = app
