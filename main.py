@@ -394,13 +394,13 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
     print("🎬 CATALOG REQUEST")
+    
+    # ⚡ FIX 1: Run auto_sync so the DB actually updates when things are deleted
+    await auto_sync()
+    
     movies = load_movies()
-
-    if not movies:
-        print("📚 Database empty -> syncing Telegram")
-        await sync_channel()
-        movies = load_movies()
     print(f"📁 MOVIES IN DB: {len(movies)}")
+    
     metas = []
     for movie_id, movie in movies.items():
         movie_name = movie.get("file_name", "Unknown Movie")
@@ -413,7 +413,14 @@ async def catalog():
             "description": movie_name,
             "posterShape": "poster"
         })
-    return JSONResponse({"metas": metas})
+        
+    # ⚡ FIX 2: Tell Stremio NOT to cache this response so deletes show up instantly
+    return JSONResponse(
+        content={"metas": metas},
+        headers={
+            "Cache-Control": "max-age=0, no-cache, no-store, must-revalidate"
+        }
+    )
 
 # ---------------------------------------------------
 # META
