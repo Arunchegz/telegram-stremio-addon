@@ -10,6 +10,26 @@ import json
 import asyncio
 import re
 import requests
+import time
+
+@app.get("/proxy/{movie_id}")
+async def proxy_stream(movie_id: str, request: Request):
+
+    t0 = time.time()
+
+    msg = await fetch_message(movie["message_id"])
+    print("FETCH MSG:", time.time() - t0)
+
+    t1 = time.time()
+
+    async for chunk in tg.stream_media(
+        msg,
+        offset=chunk_offset,
+        limit=chunks_needed,
+    ):
+        print("FIRST CHUNK:", time.time() - t1)
+        yield chunk
+        break
 
 # ---------------------------------------------------
 # ENV
