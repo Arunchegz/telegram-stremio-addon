@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +12,6 @@ import json
 import asyncio
 import re
 import requests
-import time
 
 # ---------------------------------------------------
 # ENV
@@ -272,15 +273,23 @@ async def reset():
 # ---------------------------------------------------
 MANIFEST = {
     "id": "org.arun.telegram",
-    "version": "17.0.0",
+    "version": "1.0.0",
     "name": "Telegram Movies",
-    "description": "Seekable Telegram streaming via Pyrogram",
+    "description": "Telegram Movie Catalog",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
-    "idPrefixes": ["tg", "tt"],  # Added 'tt' for IMDb matching
+    "idPrefixes": ["tg"],
     "catalogs": [
-        {"type": "movie", "id": "telegrammovies", "name": "Telegram Movies"}
+        {
+            "type": "movie",
+            "id": "telegrammovies",
+            "name": "Telegram Movies"
+        }
     ],
+    "behaviorHints": {
+        "configurable": False,
+        "configurationRequired": False
+    }
 }
 
 
@@ -335,7 +344,7 @@ async def meta(id: str):
         })
 
     # Handle internal Telegram Catalog requests
-    clean_id = id.removeprefix("tg:")
+    clean_id = id[3:] if id.startswith("tg:") else id
     movie = load_movies().get(clean_id)
     if not movie:
         return JSONResponse({"meta": {}})
@@ -398,7 +407,7 @@ async def stream(id: str):
     # ---------------------------------------------------
     # Internal Catalog Streamer (Telegram Addon Page)
     # ---------------------------------------------------
-    clean_id = id.removeprefix("tg:")
+    clean_id = id[3:] if id.startswith("tg:") else id
     movie = movies.get(clean_id)
     if not movie:
         return JSONResponse({"streams": []})
@@ -435,70 +444,55 @@ async def stream(id: str):
 # ---------------------------------------------------
 @app.api_route("/proxy/{movie_id}", methods=["GET", "HEAD"])
 async def proxy_stream(movie_id: str, request: Request):
-
-    t0 = time.time()
-
     movie = load_movies().get(movie_id)
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
 
     msg = await fetch_message(movie["message_id"])
-
-    print("FETCH MSG:", round(time.time() - t0, 2), "seconds")
-
     if is_empty(msg):
         remove_movie(movie_id)
         raise HTTPException(status_code=404, detail="Media deleted from channel")
 
-    media = get_media(msg)
-    file_size = movie.get("file_size") or media.file_size
-    filename = movie.get("file_name", "video.mp4")
-    ctype = content_type_for(filename)
+    media      = get_media(msg)
+    file_size  = movie.get("file_size") or media.file_size
+    filename   = movie.get("file_name", "video.mp4")
+    ctype      = content_type_for(filename)
 
-    # HEAD request
+    # HEAD — used by players to probe file metadata
     if request.method == "HEAD":
         return Response(
             status_code=200,
             headers={
-                "Accept-Ranges": "bytes",
+                "Accept-Ranges":  "bytes",
                 "Content-Length": str(file_size),
-                "Content-Type": ctype,
+                "Content-Type":   ctype,
             },
         )
 
     # Parse Range header
     start, end = 0, file_size - 1
-
     range_header = request.headers.get("range")
     if range_header:
         try:
-            parts = range_header.removeprefix("bytes=").split("-")
-
+            parts = range_header[6:].split("-") if range_header.startswith("bytes=") else range_header.split("-")
             if parts[0]:
                 start = int(parts[0])
-
             if len(parts) > 1 and parts[1]:
                 end = int(parts[1])
-
         except ValueError:
             pass
 
     end = min(end, file_size - 1)
 
-    # Telegram chunk alignment
-    chunk_offset = start // TG_CHUNK_SIZE
-    skip_bytes = start % TG_CHUNK_SIZE
-
-    bytes_needed = (end - start + 1) + skip_bytes
+    # Align to Telegram chunk boundaries
+    chunk_offset  = start // TG_CHUNK_SIZE
+    skip_bytes    = start % TG_CHUNK_SIZE
+    bytes_needed  = (end - start + 1) + skip_bytes
     chunks_needed = (bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
 
     async def streamer():
-
-        t1 = time.time()
-        first_chunk_log = True
-
-        sent = 0
-        first = True
+        sent       = 0
+        first      = True
         total_want = end - start + 1
 
         async with STREAM_LIMITER:
@@ -508,15 +502,6 @@ async def proxy_stream(movie_id: str, request: Request):
                     offset=chunk_offset,
                     limit=chunks_needed,
                 ):
-
-                    if first_chunk_log:
-                        print(
-                            "FIRST CHUNK:",
-                            round(time.time() - t1, 2),
-                            "seconds"
-                        )
-                        first_chunk_log = False
-
                     if await request.is_disconnected():
                         break
 
@@ -525,7 +510,6 @@ async def proxy_stream(movie_id: str, request: Request):
                         first = False
 
                     remaining = total_want - sent
-
                     if remaining <= 0:
                         break
 
@@ -536,21 +520,23 @@ async def proxy_stream(movie_id: str, request: Request):
                     yield chunk
 
             except FloodWait as e:
-                print(f"🚨 FloodWait: {e.value}s")
+                print(f"🚨 FloodWait: {e.value}s — backing off")
                 await asyncio.sleep(e.value)
-
-            except Exception as e:
-                print("STREAM ERROR:", e)
+            except Exception:
+                pass   # client disconnect or Telegram hiccup — exit cleanly
 
     return StreamingResponse(
         streamer(),
         status_code=206,
         headers={
-            "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges":  "bytes",
+            "Content-Range":  f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(end - start + 1),
-            "Content-Type": ctype,
-            "Cache-Control": "public, max-age=3600",
-            "Connection": "keep-alive",
+            "Content-Type":   ctype,
+            "Cache-Control":  "public, max-age=3600",
+            "Connection":     "keep-alive",
         },
     )
+
+# Required by Vercel
+application = app
