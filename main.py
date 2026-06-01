@@ -400,7 +400,7 @@ async def stream(id: str):
             streams.append({
                 "name":  "⚡ Telegram",
                 "title": title,
-                "url":   f"{BASE_URL}/watch/{mid}",
+                "url":   f"{BASE_URL}/proxy/{mid}",
             })
             
         return JSONResponse({"streams": streams})
@@ -435,18 +435,12 @@ async def stream(id: str):
             {
                 "name":  "⚡ Telegram",
                 "title": title,
-                "url":   f"{BASE_URL}/watch/{clean_id}",
+                "url":   f"{BASE_URL}/proxy/{clean_id}",
             }
         ]
     })
 
 
-
-@app.get("/watch/{movie_id}")
-async def watch(movie_id: str):
-    return JSONResponse({
-        "stream": f"{BASE_URL}/proxy/{movie_id}"
-    })
 
 # ---------------------------------------------------
 # PROXY / RANGE STREAMING
