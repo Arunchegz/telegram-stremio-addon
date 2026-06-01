@@ -158,7 +158,6 @@ def load_movies() -> dict:
 def save_movies(data: dict) -> None:
     global MOVIES_CACHE
     try:
-        os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
         with open(DB_FILE, "w") as f:
             json.dump(data, f, indent=2)
         MOVIES_CACHE = data
@@ -266,6 +265,10 @@ async def reset():
         return {"status": "database cleared"}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/debug")
+async def debug():
+    return load_movies()
 
 
 # ---------------------------------------------------
