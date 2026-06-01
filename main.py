@@ -21,7 +21,7 @@ API_HASH      = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 BASE_URL      = os.getenv("BASE_URL", "")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
-DB_FILE       = "/app/data/movies.json"
+DB_FILE       = "movies.json"
 
 # ---------------------------------------------------
 # PYROGRAM CLIENT
@@ -303,7 +303,6 @@ async def get_manifest():
 # ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-    await sync_channel()          # always refresh before serving
     movies = load_movies()
 
     metas = [
@@ -398,7 +397,7 @@ async def stream(id: str):
             streams.append({
                 "name":  "⚡ Telegram",
                 "title": title,
-                "url":   f"{BASE_URL}/proxy/{mid}",
+                "url":   f"{BASE_URL}/watch/{mid}",
             })
             
         return JSONResponse({"streams": streams})
@@ -433,11 +432,18 @@ async def stream(id: str):
             {
                 "name":  "⚡ Telegram",
                 "title": title,
-                "url":   f"{BASE_URL}/proxy/{clean_id}",
+                "url":   f"{BASE_URL}/watch/{clean_id}",
             }
         ]
     })
 
+
+
+@app.get("/watch/{movie_id}")
+async def watch(movie_id: str):
+    return JSONResponse({
+        "stream": f"{BASE_URL}/proxy/{movie_id}"
+    })
 
 # ---------------------------------------------------
 # PROXY / RANGE STREAMING
