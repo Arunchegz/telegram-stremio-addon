@@ -4,5 +4,4 @@ pyrogram
 tgcrypto
 requests
 python-dotenv
-uvloop
 httpx
