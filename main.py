@@ -499,17 +499,17 @@ async def proxy_stream(movie_id: str, request: Request):
         except ValueError:
             pass
 
-# No Range header
-if not range_header:
-    end = min((8 * 1024 * 1024) - 1, file_size - 1)
+    # No Range header
+    if not range_header:
+        end = min((8 * 1024 * 1024) - 1, file_size - 1)
 
-# Open-ended range (bytes=0-, bytes=12345-, etc.)
-elif range_header.endswith("-"):
-    end = min(start + (8 * 1024 * 1024) - 1, file_size - 1)
+    # Open-ended range (bytes=0-, bytes=12345-, etc.)
+    elif range_header.endswith("-"):
+        end = min(start + (8 * 1024 * 1024) - 1, file_size - 1)
 
-# Explicit end supplied
-else:
-    end = min(end, file_size - 1)
+    # Explicit end supplied
+    else:
+        end = min(end, file_size - 1)
 
     print(f"Player requested range: {start}-{end}")
 
@@ -526,10 +526,10 @@ else:
     chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE  # FIX #4
 
     print(
-    f"[{movie_id}] "
-    f"OFFSET={chunk_offset} "
-    f"SKIP={skip_bytes} "
-    f"CHUNKS={chunks_needed}"
+        f"[{movie_id}] "
+        f"OFFSET={chunk_offset} "
+        f"SKIP={skip_bytes} "
+        f"CHUNKS={chunks_needed}"
     )
 
     async def streamer():
