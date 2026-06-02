@@ -525,6 +525,13 @@ else:
     bytes_needed  = end - start + 1                                          # FIX #4: don't double-count skip_bytes
     chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE  # FIX #4
 
+    print(
+    f"[{movie_id}] "
+    f"OFFSET={chunk_offset} "
+    f"SKIP={skip_bytes} "
+    f"CHUNKS={chunks_needed}"
+    )
+
     async def streamer():
         sent              = 0
         first             = True
