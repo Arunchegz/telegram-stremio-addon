@@ -499,7 +499,10 @@ async def proxy_stream(movie_id: str, request: Request):
         except ValueError:
             pass
 
-    end = min(end, file_size - 1)
+    if range_header and range_header.endswith("-"):
+        end = min(start + (8 * 1024 * 1024) - 1, file_size - 1)
+    else:
+        end = min(end, file_size - 1)
 
     print(f"Player requested range: {start}-{end}")
 
