@@ -34,7 +34,7 @@ tg = Client(
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     no_updates=True,
-    workers=16,
+    workers=8,
 )
 
 # ---------------------------------------------------
@@ -69,14 +69,14 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connections
+STREAM_LIMITER = asyncio.Semaphore(6)   # limit parallel Telegram DC connections
 
 # Cache variables
 STARTUP_CACHE: dict = {}
 STARTUP_LOCKS: dict = {}
 TAIL_CACHE: dict    = {}
 TAIL_LOCKS: dict    = {}
-CACHE_MAX_ITEMS     = 20
+CACHE_MAX_ITEMS     = 5
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
