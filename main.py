@@ -34,7 +34,7 @@ tg = Client(
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     no_updates=True,
-    workers=8,
+    workers=16,
 )
 
 # ---------------------------------------------------
@@ -46,13 +46,13 @@ async def lifespan(app: FastAPI):
     await tg.start()
     try:
         await tg.get_chat(CHANNEL_USERNAME)
-        print("✅ Pyrogram started")
+        print("âœ… Pyrogram started")
     except Exception as e:
-        print(f"⚠️  Startup warning: {e}")
+        print(f"âš ï¸  Startup warning: {e}")
     yield
     # Shutdown
     await tg.stop()
-    print("🛑 Pyrogram stopped")
+    print("ðŸ›‘ Pyrogram stopped")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -69,7 +69,7 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(6)   # limit parallel Telegram DC connections
+STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connections
 
 # Cache variables
 STARTUP_CACHE: dict = {}
@@ -245,7 +245,7 @@ def remove_movie(movie_id: str) -> None:
     if movie_id in movies:
         del movies[movie_id]
         save_movies(movies)
-        print(f"🗑️  Removed deleted media: {movie_id}")
+        print(f"ðŸ—‘ï¸  Removed deleted media: {movie_id}")
 
 
 # ---------------------------------------------------
@@ -292,7 +292,7 @@ async def sync_channel() -> int:
                 continue
 
         save_movies(current)
-        print(f"✅ Sync complete: {len(current)} movies")
+        print(f"âœ… Sync complete: {len(current)} movies")
         return len(current)
 
 
@@ -445,18 +445,24 @@ async def stream(id: str):
             if not flexible_match(movie_title, name):
                 continue
 
-            # Year validation
-            if movie_year and movie_year not in name:
-                continue
+            # Year validation: allow Â±1 year tolerance (encode/release year drift)
+            if movie_year:
+                try:
+                    my = int(movie_year)
+                    year_ok = any(str(my + d) in name for d in (-1, 0, 1))
+                except ValueError:
+                    year_ok = movie_year in name
+                if not year_ok:
+                    continue
 
             quality = m.get("quality", "Unknown")
             size    = m.get("file_size_text", "Unknown")
             source  = m.get("source", "")
-            src_tag = f" | 🏷️ {source}" if source else ""
-            title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
+            src_tag = f" | ðŸ·ï¸ {source}" if source else ""
+            title   = f"{name}\nâš™ï¸ {quality}{src_tag} | ðŸ’¾ {size}"
 
             streams.append({
-                "name":  "⚡ Telegram",
+                "name":  "âš¡ Telegram",
                 "title": title,
                 "url":   f"{BASE_URL}/proxy/{mid}",
             })
@@ -476,8 +482,8 @@ async def stream(id: str):
         quality = movie.get("quality", "Unknown")
         size    = movie.get("file_size_text", "Unknown")
         source  = movie.get("source", "")
-        src_tag = f" | 🏷️ {source}" if source else ""
-        title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
+        src_tag = f" | ðŸ·ï¸ {source}" if source else ""
+        title   = f"{name}\nâš™ï¸ {quality}{src_tag} | ðŸ’¾ {size}"
 
         try:
             msg = await fetch_message(movie["message_id"])
@@ -499,13 +505,13 @@ async def stream(id: str):
                 )
                 
         except Exception as e:
-            print(f"❌ Stream fetch error: {e}")
+            print(f"âŒ Stream fetch error: {e}")
             return JSONResponse({"streams": []})
 
         return JSONResponse({
             "streams": [
                 {
-                    "name":  "⚡ Telegram",
+                    "name":  "âš¡ Telegram",
                     "title": title,
                     "url":   f"{BASE_URL}/proxy/{clean_id}",
                 }
@@ -798,7 +804,7 @@ async def proxy_stream(movie_id: str, request: Request):
 
 
 # ---------------------------------------------------
-# TELEGRAM WEBHOOK (placeholder – set via Bot API)
+# TELEGRAM WEBHOOK (placeholder â€“ set via Bot API)
 # ---------------------------------------------------
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
