@@ -5,3 +5,4 @@ tgcrypto
 requests
 python-dotenv
 uvloop
+httpx
