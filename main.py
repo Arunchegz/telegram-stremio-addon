@@ -338,7 +338,7 @@ MANIFEST = {
     "description": "Telegram Movie Catalog",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
-    "idPrefixes": ["tg:"],
+    "idPrefixes": ["tg:", "tt"],
     "catalogs": [
         {
             "type": "movie",
