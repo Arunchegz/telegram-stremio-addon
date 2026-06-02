@@ -10,10 +10,12 @@ from pyrogram.errors import FloodWait
 import os
 import json
 import asyncio
+import uvloop
 import re
 import httpx          # FIX #5: replaced blocking `requests` with async httpx
 import time
 
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 # ---------------------------------------------------
 # ENV
 # ---------------------------------------------------
