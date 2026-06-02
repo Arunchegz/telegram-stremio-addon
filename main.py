@@ -11,7 +11,7 @@ import os
 import json
 import asyncio
 import re
-import httpx          # FIX #5: replaced blocking `requests` with async httpx
+import httpx
 import time
 
 # ---------------------------------------------------
@@ -55,6 +55,10 @@ app.add_middleware(
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
 STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connections
+
+# Startup Cache variables
+STARTUP_CACHE: dict = {}
+STARTUP_LOCKS: dict = {}
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
@@ -445,55 +449,77 @@ async def stream(id: str):
 
 
 # ---------------------------------------------------
+# STARTUP CACHE FUNCTION
+# ---------------------------------------------------
+async def get_startup_cache(msg, movie_id: str):
+    if movie_id in STARTUP_CACHE:
+        return STARTUP_CACHE[movie_id]
+
+    lock = STARTUP_LOCKS.setdefault(movie_id, asyncio.Lock())
+
+    async with lock:
+        if movie_id in STARTUP_CACHE:
+            return STARTUP_CACHE[movie_id]
+
+        data = bytearray()
+
+        async for chunk in tg.stream_media(
+            msg,
+            offset=0,
+            limit=8,
+        ):
+            data.extend(chunk)
+
+        STARTUP_CACHE[movie_id] = bytes(data)
+
+        print(
+            f"[{movie_id}] STARTUP_CACHE_BUILT "
+            f"{len(data)/1024/1024:.2f}MB"
+        )
+
+        return STARTUP_CACHE[movie_id]
+
+
+# ---------------------------------------------------
 # PREFETCH STREAMER
 # ---------------------------------------------------
 class PrefetchStreamer:
     def __init__(self, media_generator, queue_max_size: int = 4):
         self.generator = media_generator
-        # queue_max_size=4 means buffering up to 4MB ahead in memory
         self.queue = asyncio.Queue(maxsize=queue_max_size)
         self.worker_task = None
         self.error = None
 
     async def _producer(self):
-        """Background task to fetch chunks from Telegram and push them to the queue."""
         try:
             async for chunk in self.generator:
-                # If the queue is full, this blocks, pausing the Telegram download
                 await self.queue.put(chunk)
-            # Signal that the stream has finished successfully
             await self.queue.put(None)
         except Exception as e:
             self.error = e
-            # Signal error status to consumer
             await self.queue.put(None)
 
     def start(self):
-        """Starts the producer task in the background."""
         self.worker_task = asyncio.create_task(self._producer())
 
     async def chunk_generator(self, request: Request, skip_bytes: int, total_want: int, movie_id: str):
-        """Consumes chunks from the queue, clips them to range, and yields to FastAPI."""
         sent = 0
         first = True
         
         try:
             while sent < total_want:
-                # Check if player disconnected before waiting for a chunk
                 if await request.is_disconnected():
                     print(f"[{movie_id}] PREFETCH: CLIENT_DISCONNECTED")
                     break
 
-                # Retrieve the next available chunk from the prefetch buffer
                 chunk = await self.queue.get()
                 
                 if chunk is None:
                     if self.error:
                         print(f"[{movie_id}] PREFETCH: Producer error: {self.error}")
                         raise self.error
-                    break  # End of stream reached gracefully
+                    break
 
-                # Slice off unneeded bytes if this is our very first chunk
                 if first:
                     chunk = chunk[skip_bytes:]
                     first = False
@@ -509,7 +535,6 @@ class PrefetchStreamer:
                 self.queue.task_done()
 
         finally:
-            # Crucial: clean up the background producer task when the request finishes/aborts
             if self.worker_task and not self.worker_task.done():
                 self.worker_task.cancel()
                 try:
@@ -540,7 +565,6 @@ async def proxy_stream(movie_id: str, request: Request):
     filename  = movie.get("file_name", "video.mp4")
     ctype     = content_type_for(filename)
 
-    # HEAD — used by players to probe file metadata
     if request.method == "HEAD":
         return Response(
             status_code=200,
@@ -571,19 +595,34 @@ async def proxy_stream(movie_id: str, request: Request):
         except ValueError:
             pass
 
-    # No Range header
     if not range_header:
         end = min((8 * 1024 * 1024) - 1, file_size - 1)
-
-    # Open-ended range (bytes=0-, bytes=12345-, etc.)
     elif range_header.endswith("-"):
         end = min(start + (8 * 1024 * 1024) - 1, file_size - 1)
-
-    # Explicit end supplied
     else:
         end = min(end, file_size - 1)
 
     print(f"Player requested range: {start}-{end}")
+    
+    # ---------------------------------------------------
+    # STARTUP CACHE INTERCEPT
+    # ---------------------------------------------------
+    if start < 8 * 1024 * 1024:
+        cache = await get_startup_cache(msg, movie_id)
+        cache_end = min(end, len(cache) - 1)
+
+        if cache_end >= start:
+            print(f"[{movie_id}] CACHE_HIT")
+            return Response(
+                content=cache[start:cache_end + 1],
+                status_code=206,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{cache_end}/{file_size}",
+                    "Content-Length": str(cache_end - start + 1),
+                    "Content-Type": ctype,
+                },
+            )
 
     print(
         f"[{movie_id}] RANGE={request.headers.get('range')} "
@@ -604,26 +643,22 @@ async def proxy_stream(movie_id: str, request: Request):
         f"CHUNKS={chunks_needed}"
     )
 
-    # Core Prefetch Streamer Wrapper Execution
     async def streamer_wrapper():
         stream_start = time.time()
         
         async with STREAM_LIMITER:
             try:
-                # 1. Create the native raw Pyrogram generator
                 tg_generator = tg.stream_media(
                     msg,
                     offset=chunk_offset,
                     limit=chunks_needed,
                 )
                 
-                # 2. Wrap it inside our Prefetch Queue (Buffering 4 chunks (~4MB) ahead)
                 prefetcher = PrefetchStreamer(tg_generator, queue_max_size=4)
                 prefetcher.start()
                 
                 print(f"[{movie_id}] PREFETCH: Pipeline started actively.")
 
-                # 3. Yield data through the queue reader
                 async for final_chunk in prefetcher.chunk_generator(
                     request=request,
                     skip_bytes=skip_bytes,
