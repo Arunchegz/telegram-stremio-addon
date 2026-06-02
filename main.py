@@ -56,10 +56,12 @@ MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
 STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connections
 
-# Startup Cache variables
+# Cache variables
 STARTUP_CACHE: dict = {}
 STARTUP_LOCKS: dict = {}
-CACHE_MAX_ITEMS = 20
+TAIL_CACHE: dict    = {}
+TAIL_LOCKS: dict    = {}
+CACHE_MAX_ITEMS     = 20
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
@@ -440,6 +442,14 @@ async def stream(id: str):
                 asyncio.create_task(
                     get_startup_cache(msg, clean_id)
                 )
+
+            # Warm tail cache in background
+            file_size = movie.get("file_size")
+            if file_size and clean_id not in TAIL_CACHE:
+                asyncio.create_task(
+                    get_tail_cache(msg, clean_id, file_size)
+                )
+                
         except Exception as e:
             print(f"❌ Stream fetch error: {e}")
             return JSONResponse({"streams": []})
@@ -490,6 +500,44 @@ async def get_startup_cache(msg, movie_id: str):
 
         return STARTUP_CACHE[movie_id]
 
+# ---------------------------------------------------
+# TAIL CACHE FUNCTION
+# ---------------------------------------------------
+async def get_tail_cache(msg, movie_id: str, file_size: int):
+    if movie_id in TAIL_CACHE:
+        return TAIL_CACHE[movie_id]
+        
+    lock = TAIL_LOCKS.setdefault(movie_id, asyncio.Lock())
+    
+    async with lock:
+        if movie_id in TAIL_CACHE:
+            return TAIL_CACHE[movie_id]
+            
+        offset = max(0, (file_size // TG_CHUNK_SIZE) - 8)
+        data = bytearray()
+        
+        async for chunk in tg.stream_media(
+            msg,
+            offset=offset,
+            limit=8,
+        ):
+            data.extend(chunk)
+            
+        TAIL_CACHE[movie_id] = {
+            "start": offset * TG_CHUNK_SIZE,
+            "data": bytes(data),
+        }
+        
+        while len(TAIL_CACHE) > CACHE_MAX_ITEMS:
+            oldest = next(iter(TAIL_CACHE))
+            del TAIL_CACHE[oldest]
+            
+        print(
+            f"[{movie_id}] TAIL_CACHE_BUILT "
+            f"{len(data)/1024/1024:.2f}MB"
+        )
+        
+        return TAIL_CACHE[movie_id]
 
 # ---------------------------------------------------
 # PREFETCH STREAMER
@@ -618,19 +666,23 @@ async def proxy_stream(movie_id: str, request: Request):
     # ---------------------------------------------------
     # STARTUP CACHE INTERCEPT
     # ---------------------------------------------------
-    if start < 8 * 1024 * 1024:
-        cache = await get_startup_cache(msg, movie_id)
-        cache_end = min(end, len(cache) - 1)
-
-        if cache_end >= start:
-            print(f"[{movie_id}] CACHE_HIT")
+   if start > file_size - (8 * 1024 * 1024):
+        tail = await get_tail_cache(msg, movie_id, file_size)
+        tail_start = tail["start"]
+        tail_data = tail["data"]
+        
+        rel_start = start - tail_start
+        rel_end = min(end - tail_start, len(tail_data) - 1)
+        
+        if rel_start >= 0 and rel_end >= rel_start:
+            print(f"[{movie_id}] TAIL_CACHE_HIT")
             return Response(
-                content=cache[start:cache_end + 1],
+                content=tail_data[rel_start:rel_end + 1],
                 status_code=206,
                 headers={
                     "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes {start}-{cache_end}/{file_size}",
-                    "Content-Length": str(cache_end - start + 1),
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(rel_end - rel_start + 1),
                     "Content-Type": ctype,
                 },
             )
