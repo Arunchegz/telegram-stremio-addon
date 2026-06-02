@@ -59,6 +59,7 @@ STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connection
 # Startup Cache variables
 STARTUP_CACHE: dict = {}
 STARTUP_LOCKS: dict = {}
+CACHE_MAX_ITEMS = 20
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
@@ -433,6 +434,12 @@ async def stream(id: str):
             if is_empty(msg):
                 remove_movie(clean_id)
                 return JSONResponse({"streams": []})
+
+            # Warm startup cache in background
+            if clean_id not in STARTUP_CACHE:
+                asyncio.create_task(
+                    get_startup_cache(msg, clean_id)
+                )
         except Exception as e:
             print(f"❌ Stream fetch error: {e}")
             return JSONResponse({"streams": []})
@@ -471,6 +478,10 @@ async def get_startup_cache(msg, movie_id: str):
             data.extend(chunk)
 
         STARTUP_CACHE[movie_id] = bytes(data)
+
+        while len(STARTUP_CACHE) > CACHE_MAX_ITEMS:
+            oldest = next(iter(STARTUP_CACHE))
+            del STARTUP_CACHE[oldest]
 
         print(
             f"[{movie_id}] STARTUP_CACHE_BUILT "
