@@ -34,7 +34,7 @@ tg = Client(
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     no_updates=True,
-    workers=8,
+    workers=16,
 )
 
 # ---------------------------------------------------
@@ -69,14 +69,14 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(6)   # limit parallel Telegram DC connections
+STREAM_LIMITER = asyncio.Semaphore(12)   # limit parallel Telegram DC connections
 
 # Cache variables
 STARTUP_CACHE: dict = {}
 STARTUP_LOCKS: dict = {}
 TAIL_CACHE: dict    = {}
 TAIL_LOCKS: dict    = {}
-CACHE_MAX_ITEMS     = 5
+CACHE_MAX_ITEMS     = 20
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
 
@@ -161,6 +161,57 @@ async def get_cinemeta(type_name: str, imdb_id: str):
             )
     except Exception:
         return ("", "")
+
+
+# ---------------------------------------------------
+# POSTER HELPERS
+# ---------------------------------------------------
+POSTER_CACHE: dict = {}
+
+def parse_title_year(filename: str):
+    """Extract clean title and year from a release filename."""
+    name = filename
+    # strip extension
+    name = re.sub(r"\.[a-zA-Z0-9]{2,4}$", "", name)
+    # replace dots/underscores with spaces
+    name = re.sub(r"[._]", " ", name)
+    # find year
+    year_match = re.search(r"\b(19|20)\d{2}\b", name)
+    year = year_match.group(0) if year_match else ""
+    # cut title at year or common release tags
+    cut = re.split(
+        r"\b(?:19|20)\d{2}\b|\b(?:1080p|2160p|720p|480p|bluray|webrip|web dl|bdrip|hdrip|remux|x264|x265|hevc|avc|h264|h265|aac|dts|atmos|10bit)\b",
+        name, maxsplit=1, flags=re.IGNORECASE
+    )[0]
+    title = re.sub(r"\s+", " ", cut).strip().title()
+    return title, year
+
+
+async def fetch_tmdb_poster(filename: str) -> str:
+    """Return a TMDB poster URL for the given filename, or fallback placeholder."""
+    if filename in POSTER_CACHE:
+        return POSTER_CACHE[filename]
+
+    title, year = parse_title_year(filename)
+    if not title:
+        return "https://via.placeholder.com/300x450?text=No+Poster"
+
+    try:
+        query = f"{title} {year}".strip()
+        url   = f"https://v3-cinemeta.strem.io/catalog/movie/top/search={query}.json"
+        async with httpx.AsyncClient(timeout=8) as client:
+            r    = await client.get(url)
+            metas = r.json().get("metas", [])
+            if metas and metas[0].get("poster"):
+                poster = metas[0]["poster"]
+                POSTER_CACHE[filename] = poster
+                return poster
+    except Exception:
+        pass
+
+    fallback = f"https://via.placeholder.com/300x450?text={title.replace(' ', '+')}"
+    POSTER_CACHE[filename] = fallback
+    return fallback
 
 
 # ---------------------------------------------------
@@ -287,7 +338,7 @@ MANIFEST = {
     "description": "Telegram Movie Catalog",
     "resources": ["catalog", "meta", "stream"],
     "types": ["movie"],
-    "idPrefixes": ["tg"],
+    "idPrefixes": ["tg:"],
     "catalogs": [
         {
             "type": "movie",
@@ -314,21 +365,21 @@ async def get_manifest():
 async def catalog():
     movies = load_movies()
 
-    metas = [
-        {
+    async def build_meta(mid, m):
+        filename = m.get("file_name", "Unknown")
+        poster   = await fetch_tmdb_poster(filename)
+        return {
             "id":          f"tg:{mid}",
             "type":        "movie",
-            "name":        m.get("file_name", "Unknown"),
-            "poster":      "https://placehold.co/300x450?text=Telegram",
-            "background":  "https://placehold.co/1280x720?text=Telegram",
-            "description": m.get("file_name", ""),
+            "name":        filename,
+            "poster":      poster,
             "posterShape": "poster",
         }
-        for mid, m in movies.items()
-    ]
+
+    metas = await asyncio.gather(*[build_meta(mid, m) for mid, m in movies.items()])
 
     return JSONResponse(
-        {"metas": metas},
+        {"metas": list(metas)},
         headers={"Cache-Control": "no-store"},
     )
 
@@ -347,7 +398,6 @@ async def meta(id: str):
                 "type":   "movie",
                 "name":   title,
                 "year":   year,
-                "poster": "https://placehold.co/300x450?text=Telegram",
             }
         })
 
@@ -357,14 +407,16 @@ async def meta(id: str):
     if not movie:
         return JSONResponse({"meta": {}})
 
-    name = movie.get("file_name", "Unknown")
+    name   = movie.get("file_name", "Unknown")
+    poster = await fetch_tmdb_poster(name)
+    title, year = parse_title_year(name)
     return JSONResponse({
         "meta": {
             "id":          id,
             "type":        "movie",
-            "name":        name,
-            "poster":      "https://placehold.co/300x450?text=Telegram",
-            "background":  "https://placehold.co/1280x720?text=Telegram",
+            "name":        title or name,
+            "year":        year,
+            "poster":      poster,
             "description": name,
             "posterShape": "poster",
         }
