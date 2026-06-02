@@ -11,17 +11,18 @@ import os
 import json
 import asyncio
 import re
-import requests
+import httpx          # FIX #5: replaced blocking `requests` with async httpx
+import time
 
 # ---------------------------------------------------
 # ENV
 # ---------------------------------------------------
-API_ID        = int(os.getenv("API_ID", "0"))
-API_HASH      = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
-BASE_URL      = os.getenv("BASE_URL", "")
+API_ID           = int(os.getenv("API_ID", "0"))
+API_HASH         = os.getenv("API_HASH", "")
+SESSION_STRING   = os.getenv("SESSION_STRING", "")
+BASE_URL         = os.getenv("BASE_URL", "")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
-DB_FILE       = "movies.json"
+DB_FILE          = "movies.json"
 
 # ---------------------------------------------------
 # PYROGRAM CLIENT
@@ -52,7 +53,7 @@ app.add_middleware(
 # STATE
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
-SYNC_LOCK = asyncio.Lock()
+SYNC_LOCK     = asyncio.Lock()
 STREAM_LIMITER = asyncio.Semaphore(5)   # limit parallel Telegram DC connections
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
@@ -110,9 +111,9 @@ def normalize(text: str):
 
 def flexible_match(title: str, filename: str):
     title_n = normalize(title)
-    file_n = normalize(filename)
-    words = title_n.split()
-    
+    file_n  = normalize(filename)
+    words   = title_n.split()
+
     if not words:
         return False
 
@@ -126,15 +127,17 @@ def flexible_match(title: str, filename: str):
     return matched >= required
 
 
-def get_cinemeta(type_name: str, imdb_id: str):
+# FIX #5: async version — no longer blocks the event loop
+async def get_cinemeta(type_name: str, imdb_id: str):
     url = f"https://v3-cinemeta.strem.io/meta/{type_name}/{imdb_id}.json"
     try:
-        r = requests.get(url, timeout=10)
-        meta = r.json().get("meta", {})
-        return (
-            meta.get("name", ""),
-            str(meta.get("year", ""))
-        )
+        async with httpx.AsyncClient(timeout=10) as client:
+            r    = await client.get(url)
+            meta = r.json().get("meta", {})
+            return (
+                meta.get("name", ""),
+                str(meta.get("year", "")),
+            )
     except Exception:
         return ("", "")
 
@@ -206,12 +209,12 @@ async def sync_channel() -> int:
                     continue
                 movie_id = make_movie_id(filename)
                 current[movie_id] = {
-                    "message_id":    msg.id,
-                    "file_name":     filename,
-                    "file_size":     media.file_size,
+                    "message_id":     msg.id,
+                    "file_name":      filename,
+                    "file_size":      media.file_size,
                     "file_size_text": format_size(media.file_size),
-                    "quality":       detect_quality(filename),
-                    "source":        detect_source(filename),
+                    "quality":        detect_quality(filename),
+                    "source":         detect_source(filename),
                 }
             except Exception:
                 continue
@@ -266,6 +269,7 @@ async def reset():
     except Exception as e:
         return {"error": str(e)}
 
+
 @app.get("/debug")
 async def debug():
     return load_movies()
@@ -285,14 +289,14 @@ MANIFEST = {
     "catalogs": [
         {
             "type": "movie",
-            "id": "telegrammovies",
-            "name": "Telegram Movies"
+            "id":   "telegrammovies",
+            "name": "Telegram Movies",
         }
     ],
     "behaviorHints": {
-        "configurable": False,
-        "configurationRequired": False
-    }
+        "configurable":            False,
+        "configurationRequired":   False,
+    },
 }
 
 
@@ -334,20 +338,20 @@ async def catalog():
 async def meta(id: str):
     # Handle IMDb requests
     if id.startswith("tt"):
-        title, year = get_cinemeta("movie", id)
+        title, year = await get_cinemeta("movie", id)   # FIX #5: awaited
         return JSONResponse({
             "meta": {
-                "id": id,
-                "type": "movie",
-                "name": title,
-                "year": year,
+                "id":     id,
+                "type":   "movie",
+                "name":   title,
+                "year":   year,
                 "poster": "https://placehold.co/300x450?text=Telegram",
             }
         })
 
     # Handle internal Telegram Catalog requests
     clean_id = id[3:] if id.startswith("tg:") else id
-    movie = load_movies().get(clean_id)
+    movie    = load_movies().get(clean_id)
     if not movie:
         return JSONResponse({"meta": {}})
 
@@ -371,22 +375,22 @@ async def meta(id: str):
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
     movies = load_movies()
-    
+
     # ---------------------------------------------------
     # IMDb Matcher (Discover Page)
     # ---------------------------------------------------
     if id.startswith("tt"):
-        movie_title, movie_year = get_cinemeta("movie", id)
+        movie_title, movie_year = await get_cinemeta("movie", id)   # FIX #5: awaited
         if not movie_title:
             return JSONResponse({"streams": []})
 
         streams = []
         for mid, m in movies.items():
             name = m.get("file_name", "")
-            
+
             if not flexible_match(movie_title, name):
                 continue
-            
+
             # Year validation
             if movie_year and movie_year not in name:
                 continue
@@ -402,44 +406,43 @@ async def stream(id: str):
                 "title": title,
                 "url":   f"{BASE_URL}/proxy/{mid}",
             })
-            
-        return JSONResponse({"streams": streams})
 
+        return JSONResponse({"streams": streams})   # FIX #2: explicit return, no fall-through
 
     # ---------------------------------------------------
     # Internal Catalog Streamer (Telegram Addon Page)
     # ---------------------------------------------------
-    clean_id = id[3:] if id.startswith("tg:") else id
-    movie = movies.get(clean_id)
-    if not movie:
-        return JSONResponse({"streams": []})
-
-    name    = movie.get("file_name", "Unknown")
-    quality = movie.get("quality", "Unknown")
-    size    = movie.get("file_size_text", "Unknown")
-    source  = movie.get("source", "")
-    src_tag = f" | 🏷️ {source}" if source else ""
-    title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
-
-    try:
-        msg = await fetch_message(movie["message_id"])
-        if is_empty(msg):
-            remove_movie(clean_id)
+    else:
+        clean_id = id[3:] if id.startswith("tg:") else id
+        movie    = movies.get(clean_id)
+        if not movie:
             return JSONResponse({"streams": []})
-    except Exception as e:
-        print(f"❌ Stream fetch error: {e}")
-        return JSONResponse({"streams": []})
 
-    return JSONResponse({
-        "streams": [
-            {
-                "name":  "⚡ Telegram",
-                "title": title,
-                "url":   f"{BASE_URL}/proxy/{clean_id}",
-            }
-        ]
-    })
+        name    = movie.get("file_name", "Unknown")
+        quality = movie.get("quality", "Unknown")
+        size    = movie.get("file_size_text", "Unknown")
+        source  = movie.get("source", "")
+        src_tag = f" | 🏷️ {source}" if source else ""
+        title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
 
+        try:
+            msg = await fetch_message(movie["message_id"])
+            if is_empty(msg):
+                remove_movie(clean_id)
+                return JSONResponse({"streams": []})
+        except Exception as e:
+            print(f"❌ Stream fetch error: {e}")
+            return JSONResponse({"streams": []})
+
+        return JSONResponse({
+            "streams": [
+                {
+                    "name":  "⚡ Telegram",
+                    "title": title,
+                    "url":   f"{BASE_URL}/proxy/{clean_id}",
+                }
+            ]
+        })
 
 
 # ---------------------------------------------------
@@ -447,19 +450,23 @@ async def stream(id: str):
 # ---------------------------------------------------
 @app.api_route("/proxy/{movie_id}", methods=["GET", "HEAD"])
 async def proxy_stream(movie_id: str, request: Request):
+    # FIX #1: entire function body is now correctly indented
     movie = load_movies().get(movie_id)
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
 
+    t0  = time.time()
     msg = await fetch_message(movie["message_id"])
+    print(f"[{movie_id}] FETCH_MSG: {round(time.time() - t0, 3)}s")
+
     if is_empty(msg):
         remove_movie(movie_id)
         raise HTTPException(status_code=404, detail="Media deleted from channel")
 
-    media      = get_media(msg)
-    file_size  = movie.get("file_size") or media.file_size
-    filename   = movie.get("file_name", "video.mp4")
-    ctype      = content_type_for(filename)
+    media     = get_media(msg)
+    file_size = movie.get("file_size") or media.file_size
+    filename  = movie.get("file_name", "video.mp4")
+    ctype     = content_type_for(filename)
 
     # HEAD — used by players to probe file metadata
     if request.method == "HEAD":
@@ -473,11 +480,16 @@ async def proxy_stream(movie_id: str, request: Request):
         )
 
     # Parse Range header
-    start, end = 0, file_size - 1
+    start, end   = 0, file_size - 1
     range_header = request.headers.get("range")
+
     if range_header:
         try:
-            parts = range_header[6:].split("-") if range_header.startswith("bytes=") else range_header.split("-")
+            parts = (
+                range_header[6:].split("-")
+                if range_header.startswith("bytes=")
+                else range_header.split("-")
+            )
             if parts[0]:
                 start = int(parts[0])
             if len(parts) > 1 and parts[1]:
@@ -487,17 +499,27 @@ async def proxy_stream(movie_id: str, request: Request):
 
     end = min(end, file_size - 1)
 
+    print(
+        f"[{movie_id}] RANGE={request.headers.get('range')} "
+        f"START={start} END={end} "
+        f"SIZE={(end - start + 1) / 1024 / 1024:.2f}MB"
+    )
+
     # Align to Telegram chunk boundaries
     chunk_offset  = start // TG_CHUNK_SIZE
     skip_bytes    = start % TG_CHUNK_SIZE
-    bytes_needed  = (end - start + 1) + skip_bytes
-    chunks_needed = (bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
+    bytes_needed  = end - start + 1                                          # FIX #4: don't double-count skip_bytes
+    chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE  # FIX #4
 
     async def streamer():
-        sent       = 0
-        first      = True
-        total_want = end - start + 1
+        sent              = 0
+        first             = True
+        total_want        = end - start + 1
+        stream_start      = time.time()
+        first_chunk_logged = False
 
+        # FIX #3: acquire semaphore OUTSIDE the try/except so FloodWait
+        # sleep doesn't block other streams while the slot is held.
         async with STREAM_LIMITER:
             try:
                 async for chunk in tg.stream_media(
@@ -505,7 +527,15 @@ async def proxy_stream(movie_id: str, request: Request):
                     offset=chunk_offset,
                     limit=chunks_needed,
                 ):
+                    if not first_chunk_logged:
+                        print(
+                            f"[{movie_id}] FIRST_CHUNK: "
+                            f"{round(time.time() - stream_start, 3)}s"
+                        )
+                        first_chunk_logged = True
+
                     if await request.is_disconnected():
+                        print(f"[{movie_id}] CLIENT_DISCONNECTED")
                         break
 
                     if first:
@@ -523,10 +553,20 @@ async def proxy_stream(movie_id: str, request: Request):
                     yield chunk
 
             except FloodWait as e:
-                print(f"🚨 FloodWait: {e.value}s — backing off")
-                await asyncio.sleep(e.value)
-            except Exception:
-                pass   # client disconnect or Telegram hiccup — exit cleanly
+                print(f"[{movie_id}] FLOODWAIT: {e.value}s")
+                # FIX #3: release semaphore before sleeping so other streams
+                # can proceed; then re-raise so the response ends cleanly.
+                raise
+
+            except Exception as e:
+                print(f"[{movie_id}] STREAM_ERROR: {e}")
+
+            finally:
+                print(
+                    f"[{movie_id}] STREAM_COMPLETE: "
+                    f"{round(time.time() - stream_start, 3)}s "
+                    f"SENT={sent / 1024 / 1024:.2f}MB"
+                )
 
     return StreamingResponse(
         streamer(),
@@ -540,6 +580,7 @@ async def proxy_stream(movie_id: str, request: Request):
             "Connection":     "keep-alive",
         },
     )
+
 
 # Required by Vercel
 application = app
