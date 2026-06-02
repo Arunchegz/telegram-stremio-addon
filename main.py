@@ -666,7 +666,30 @@ async def proxy_stream(movie_id: str, request: Request):
     # ---------------------------------------------------
     # STARTUP CACHE INTERCEPT
     # ---------------------------------------------------
-   if start > file_size - (8 * 1024 * 1024):
+       # ---------------------------------------------------
+    # STARTUP CACHE INTERCEPT
+    # ---------------------------------------------------
+    if start < 8 * 1024 * 1024:
+        cache = await get_startup_cache(msg, movie_id)
+        cache_end = min(end, len(cache) - 1)
+
+        if cache_end >= start:
+            print(f"[{movie_id}] CACHE_HIT")
+            return Response(
+                content=cache[start:cache_end + 1],
+                status_code=206,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{cache_end}/{file_size}",
+                    "Content-Length": str(cache_end - start + 1),
+                    "Content-Type": ctype,
+                },
+            )
+
+    # ---------------------------------------------------
+    # TAIL CACHE INTERCEPT
+    # ---------------------------------------------------
+    if start > file_size - (8 * 1024 * 1024):
         tail = await get_tail_cache(msg, movie_id, file_size)
         tail_start = tail["start"]
         tail_data = tail["data"]
@@ -687,73 +710,6 @@ async def proxy_stream(movie_id: str, request: Request):
                 },
             )
 
-    print(
-        f"[{movie_id}] RANGE={request.headers.get('range')} "
-        f"START={start} END={end} "
-        f"SIZE={(end - start + 1) / 1024 / 1024:.2f}MB"
-    )
-
-    # Align to Telegram chunk boundaries
-    chunk_offset  = start // TG_CHUNK_SIZE
-    skip_bytes    = start % TG_CHUNK_SIZE
-    bytes_needed  = end - start + 1
-    chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
-
-    print(
-        f"[{movie_id}] "
-        f"OFFSET={chunk_offset} "
-        f"SKIP={skip_bytes} "
-        f"CHUNKS={chunks_needed}"
-    )
-
-    async def streamer_wrapper():
-        stream_start = time.time()
-        
-        async with STREAM_LIMITER:
-            try:
-                tg_generator = tg.stream_media(
-                    msg,
-                    offset=chunk_offset,
-                    limit=chunks_needed,
-                )
-                
-                prefetcher = PrefetchStreamer(tg_generator, queue_max_size=4)
-                prefetcher.start()
-                
-                print(f"[{movie_id}] PREFETCH: Pipeline started actively.")
-
-                async for final_chunk in prefetcher.chunk_generator(
-                    request=request,
-                    skip_bytes=skip_bytes,
-                    total_want=bytes_needed,
-                    movie_id=movie_id
-                ):
-                    yield final_chunk
-
-            except FloodWait as e:
-                print(f"[{movie_id}] FLOODWAIT: {e.value}s")
-                raise
-            except Exception as e:
-                print(f"[{movie_id}] STREAM_ERROR: {e}")
-            finally:
-                print(
-                    f"[{movie_id}] STREAM_COMPLETE: "
-                    f"{round(time.time() - stream_start, 3)}s "
-                    f"SENT={(bytes_needed) / 1024 / 1024:.2f}MB"
-                )
-
-    return StreamingResponse(
-        streamer_wrapper(),
-        status_code=206,
-        headers={
-            "Accept-Ranges":  "bytes",
-            "Content-Range":  f"bytes {start}-{end}/{file_size}",
-            "Content-Length": str(end - start + 1),
-            "Content-Type":   ctype,
-            "Cache-Control":  "public, max-age=3600",
-            "Connection":     "keep-alive",
-        },
-    )
 
 
 # Required by Vercel
