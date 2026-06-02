@@ -127,7 +127,6 @@ def flexible_match(title: str, filename: str):
     return matched >= required
 
 
-# FIX #5: async version — no longer blocks the event loop
 async def get_cinemeta(type_name: str, imdb_id: str):
     url = f"https://v3-cinemeta.strem.io/meta/{type_name}/{imdb_id}.json"
     try:
@@ -338,7 +337,7 @@ async def catalog():
 async def meta(id: str):
     # Handle IMDb requests
     if id.startswith("tt"):
-        title, year = await get_cinemeta("movie", id)   # FIX #5: awaited
+        title, year = await get_cinemeta("movie", id)
         return JSONResponse({
             "meta": {
                 "id":     id,
@@ -380,7 +379,7 @@ async def stream(id: str):
     # IMDb Matcher (Discover Page)
     # ---------------------------------------------------
     if id.startswith("tt"):
-        movie_title, movie_year = await get_cinemeta("movie", id)   # FIX #5: awaited
+        movie_title, movie_year = await get_cinemeta("movie", id)
         if not movie_title:
             return JSONResponse({"streams": []})
 
@@ -407,7 +406,7 @@ async def stream(id: str):
                 "url":   f"{BASE_URL}/proxy/{mid}",
             })
 
-        return JSONResponse({"streams": streams})   # FIX #2: explicit return, no fall-through
+        return JSONResponse({"streams": streams})
 
     # ---------------------------------------------------
     # Internal Catalog Streamer (Telegram Addon Page)
@@ -446,11 +445,84 @@ async def stream(id: str):
 
 
 # ---------------------------------------------------
+# PREFETCH STREAMER
+# ---------------------------------------------------
+class PrefetchStreamer:
+    def __init__(self, media_generator, queue_max_size: int = 4):
+        self.generator = media_generator
+        # queue_max_size=4 means buffering up to 4MB ahead in memory
+        self.queue = asyncio.Queue(maxsize=queue_max_size)
+        self.worker_task = None
+        self.error = None
+
+    async def _producer(self):
+        """Background task to fetch chunks from Telegram and push them to the queue."""
+        try:
+            async for chunk in self.generator:
+                # If the queue is full, this blocks, pausing the Telegram download
+                await self.queue.put(chunk)
+            # Signal that the stream has finished successfully
+            await self.queue.put(None)
+        except Exception as e:
+            self.error = e
+            # Signal error status to consumer
+            await self.queue.put(None)
+
+    def start(self):
+        """Starts the producer task in the background."""
+        self.worker_task = asyncio.create_task(self._producer())
+
+    async def chunk_generator(self, request: Request, skip_bytes: int, total_want: int, movie_id: str):
+        """Consumes chunks from the queue, clips them to range, and yields to FastAPI."""
+        sent = 0
+        first = True
+        
+        try:
+            while sent < total_want:
+                # Check if player disconnected before waiting for a chunk
+                if await request.is_disconnected():
+                    print(f"[{movie_id}] PREFETCH: CLIENT_DISCONNECTED")
+                    break
+
+                # Retrieve the next available chunk from the prefetch buffer
+                chunk = await self.queue.get()
+                
+                if chunk is None:
+                    if self.error:
+                        print(f"[{movie_id}] PREFETCH: Producer error: {self.error}")
+                        raise self.error
+                    break  # End of stream reached gracefully
+
+                # Slice off unneeded bytes if this is our very first chunk
+                if first:
+                    chunk = chunk[skip_bytes:]
+                    first = False
+
+                remaining = total_want - sent
+                if len(chunk) > remaining:
+                    chunk = chunk[:remaining]
+
+                if chunk:
+                    sent += len(chunk)
+                    yield chunk
+                    
+                self.queue.task_done()
+
+        finally:
+            # Crucial: clean up the background producer task when the request finishes/aborts
+            if self.worker_task and not self.worker_task.done():
+                self.worker_task.cancel()
+                try:
+                    await self.worker_task
+                except asyncio.CancelledError:
+                    pass
+
+
+# ---------------------------------------------------
 # PROXY / RANGE STREAMING
 # ---------------------------------------------------
 @app.api_route("/proxy/{movie_id}", methods=["GET", "HEAD"])
 async def proxy_stream(movie_id: str, request: Request):
-    # FIX #1: entire function body is now correctly indented
     movie = load_movies().get(movie_id)
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
@@ -522,8 +594,8 @@ async def proxy_stream(movie_id: str, request: Request):
     # Align to Telegram chunk boundaries
     chunk_offset  = start // TG_CHUNK_SIZE
     skip_bytes    = start % TG_CHUNK_SIZE
-    bytes_needed  = end - start + 1                                          # FIX #4: don't double-count skip_bytes
-    chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE  # FIX #4
+    bytes_needed  = end - start + 1
+    chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
 
     print(
         f"[{movie_id}] "
@@ -532,65 +604,48 @@ async def proxy_stream(movie_id: str, request: Request):
         f"CHUNKS={chunks_needed}"
     )
 
-    async def streamer():
-        sent              = 0
-        first             = True
-        total_want        = end - start + 1
-        stream_start      = time.time()
-        first_chunk_logged = False
-
-        # FIX #3: acquire semaphore OUTSIDE the try/except so FloodWait
-        # sleep doesn't block other streams while the slot is held.
+    # Core Prefetch Streamer Wrapper Execution
+    async def streamer_wrapper():
+        stream_start = time.time()
+        
         async with STREAM_LIMITER:
             try:
-                async for chunk in tg.stream_media(
+                # 1. Create the native raw Pyrogram generator
+                tg_generator = tg.stream_media(
                     msg,
                     offset=chunk_offset,
                     limit=chunks_needed,
+                )
+                
+                # 2. Wrap it inside our Prefetch Queue (Buffering 4 chunks (~4MB) ahead)
+                prefetcher = PrefetchStreamer(tg_generator, queue_max_size=4)
+                prefetcher.start()
+                
+                print(f"[{movie_id}] PREFETCH: Pipeline started actively.")
+
+                # 3. Yield data through the queue reader
+                async for final_chunk in prefetcher.chunk_generator(
+                    request=request,
+                    skip_bytes=skip_bytes,
+                    total_want=bytes_needed,
+                    movie_id=movie_id
                 ):
-                    if not first_chunk_logged:
-                        print(
-                            f"[{movie_id}] FIRST_CHUNK: "
-                            f"{round(time.time() - stream_start, 3)}s"
-                        )
-                        first_chunk_logged = True
-
-                    if await request.is_disconnected():
-                        print(f"[{movie_id}] CLIENT_DISCONNECTED")
-                        break
-
-                    if first:
-                        chunk = chunk[skip_bytes:]
-                        first = False
-
-                    remaining = total_want - sent
-                    if remaining <= 0:
-                        break
-
-                    if len(chunk) > remaining:
-                        chunk = chunk[:remaining]
-
-                    sent += len(chunk)
-                    yield chunk
+                    yield final_chunk
 
             except FloodWait as e:
                 print(f"[{movie_id}] FLOODWAIT: {e.value}s")
-                # FIX #3: release semaphore before sleeping so other streams
-                # can proceed; then re-raise so the response ends cleanly.
                 raise
-
             except Exception as e:
                 print(f"[{movie_id}] STREAM_ERROR: {e}")
-
             finally:
                 print(
                     f"[{movie_id}] STREAM_COMPLETE: "
                     f"{round(time.time() - stream_start, 3)}s "
-                    f"SENT={sent / 1024 / 1024:.2f}MB"
+                    f"SENT={(bytes_needed) / 1024 / 1024:.2f}MB"
                 )
 
     return StreamingResponse(
-        streamer(),
+        streamer_wrapper(),
         status_code=206,
         headers={
             "Accept-Ranges":  "bytes",
