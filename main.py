@@ -513,7 +513,8 @@ async def get_tail_cache(msg, movie_id: str, file_size: int):
         if movie_id in TAIL_CACHE:
             return TAIL_CACHE[movie_id]
             
-        offset = max(0, (file_size // TG_CHUNK_SIZE) - 8)
+        total_chunks = (file_size + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
+        offset = max(0, total_chunks - 8)
         data = bytearray()
         
         async for chunk in tg.stream_media(
@@ -666,9 +667,6 @@ async def proxy_stream(movie_id: str, request: Request):
     # ---------------------------------------------------
     # STARTUP CACHE INTERCEPT
     # ---------------------------------------------------
-       # ---------------------------------------------------
-    # STARTUP CACHE INTERCEPT
-    # ---------------------------------------------------
     if start < 8 * 1024 * 1024:
         cache = await get_startup_cache(msg, movie_id)
         cache_end = min(end, len(cache) - 1)
@@ -690,27 +688,94 @@ async def proxy_stream(movie_id: str, request: Request):
     # TAIL CACHE INTERCEPT
     # ---------------------------------------------------
     if start > file_size - (8 * 1024 * 1024):
-        tail = await get_tail_cache(msg, movie_id, file_size)
-        tail_start = tail["start"]
-        tail_data = tail["data"]
-        
-        rel_start = start - tail_start
-        rel_end = min(end - tail_start, len(tail_data) - 1)
-        
-        if rel_start >= 0 and rel_end >= rel_start:
-            print(f"[{movie_id}] TAIL_CACHE_HIT")
-            return Response(
-                content=tail_data[rel_start:rel_end + 1],
-                status_code=206,
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes {start}-{end}/{file_size}",
-                    "Content-Length": str(rel_end - rel_start + 1),
-                    "Content-Type": ctype,
-                },
-            )
+        if movie_id in TAIL_CACHE:
+            tail = TAIL_CACHE[movie_id]
+            tail_start = tail["start"]
+            tail_data = tail["data"]
+            
+            rel_start = start - tail_start
+            rel_end = min(end - tail_start, len(tail_data) - 1)
+            
+            if rel_start >= 0 and rel_start < len(tail_data) and rel_end >= rel_start:
+                print(f"[{movie_id}] TAIL_CACHE_HIT")
+                return Response(
+                    content=tail_data[rel_start:rel_end + 1],
+                    status_code=206,
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+                        "Content-Length": str(rel_end - rel_start + 1),
+                        "Content-Type": ctype,
+                    },
+                )
 
+    print(
+        f"[{movie_id}] RANGE={request.headers.get('range')} "
+        f"START={start} END={end} "
+        f"SIZE={(end - start + 1) / 1024 / 1024:.2f}MB"
+    )
 
+    # Align to Telegram chunk boundaries
+    chunk_offset  = start // TG_CHUNK_SIZE
+    skip_bytes    = start % TG_CHUNK_SIZE
+    bytes_needed  = end - start + 1
+    chunks_needed = (skip_bytes + bytes_needed + TG_CHUNK_SIZE - 1) // TG_CHUNK_SIZE
+
+    print(
+        f"[{movie_id}] "
+        f"OFFSET={chunk_offset} "
+        f"SKIP={skip_bytes} "
+        f"CHUNKS={chunks_needed}"
+    )
+
+    async def streamer_wrapper():
+        stream_start = time.time()
+        
+        async with STREAM_LIMITER:
+            try:
+                tg_generator = tg.stream_media(
+                    msg,
+                    offset=chunk_offset,
+                    limit=chunks_needed,
+                )
+                
+                prefetcher = PrefetchStreamer(tg_generator, queue_max_size=4)
+                prefetcher.start()
+                
+                print(f"[{movie_id}] PREFETCH: Pipeline started actively.")
+
+                async for final_chunk in prefetcher.chunk_generator(
+                    request=request,
+                    skip_bytes=skip_bytes,
+                    total_want=bytes_needed,
+                    movie_id=movie_id
+                ):
+                    yield final_chunk
+
+            except FloodWait as e:
+                print(f"[{movie_id}] FLOODWAIT: {e.value}s")
+                raise
+            except Exception as e:
+                print(f"[{movie_id}] STREAM_ERROR: {e}")
+            finally:
+                print(
+                    f"[{movie_id}] STREAM_COMPLETE: "
+                    f"{round(time.time() - stream_start, 3)}s "
+                    f"SENT={(bytes_needed) / 1024 / 1024:.2f}MB"
+                )
+
+    return StreamingResponse(
+        streamer_wrapper(),
+        status_code=206,
+        headers={
+            "Accept-Ranges":  "bytes",
+            "Content-Range":  f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(end - start + 1),
+            "Content-Type":   ctype,
+            "Cache-Control":  "public, max-age=3600",
+            "Connection":     "keep-alive",
+        },
+    )
 
 # Required by Vercel
 application = app
