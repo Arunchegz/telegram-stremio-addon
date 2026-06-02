@@ -480,8 +480,10 @@ async def proxy_stream(movie_id: str, request: Request):
         )
 
     # Parse Range header
-    start, end   = 0, file_size - 1
+    start, end = 0, file_size - 1
     range_header = request.headers.get("range")
+
+    print(f"RAW RANGE HEADER: {range_header}")
 
     if range_header:
         try:
@@ -498,6 +500,8 @@ async def proxy_stream(movie_id: str, request: Request):
             pass
 
     end = min(end, file_size - 1)
+
+    print(f"Player requested range: {start}-{end}")
 
     print(
         f"[{movie_id}] RANGE={request.headers.get('range')} "
