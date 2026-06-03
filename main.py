@@ -707,11 +707,11 @@ async def stream(id: str):
             quality = m.get("quality", "Unknown")
             size    = m.get("file_size_text", "Unknown")
             source  = m.get("source", "")
-            src_tag = f" | ðŸ·ï¸ {source}" if source else ""
-            title   = f"{name}\nâš™ï¸ {quality}{src_tag} | ðŸ’¾ {size}"
+            src_tag = f" | {source}" if source else ""
+title = f"{name}\n{quality}{src_tag} | {size}"
 
             streams.append({
-                "name":  "âš¡ Telegram",
+                "name":  "Telegram",
                 "title": title,
                 "url":   f"{BASE_URL}/proxy/{mid}",
             })
@@ -758,14 +758,14 @@ async def stream(id: str):
             return JSONResponse({"streams": []})
 
         return JSONResponse({
-            "streams": [
-                {
-                    "name":  "âš¡ Telegram",
-                    "title": title,
-                    "url":   f"{BASE_URL}/proxy/{clean_id}",
-                }
-            ]
-        })
+    "streams": [
+        {
+            "name": "Telegram",
+            "title": title,
+            "url": f"{BASE_URL}/proxy/{clean_id}",
+        }
+    ]
+})
 
 
 # ---------------------------------------------------
