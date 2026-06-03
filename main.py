@@ -5,15 +5,43 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from pyrogram import Client
-from pyrogram.errors import FloodWait
+from pyrogram import Client, utils, raw
+from pyrogram.errors import FloodWait, AuthBytesInvalid
+from pyrogram.session import Session, Auth
+from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
 import os
 import json
 import asyncio
+import math
 import re
 import httpx
 import time
+from typing import AsyncGenerator, Dict, Union
+
+# ---------------------------------------------------------------------------
+# Pyrogram internal-API version guard
+# ByteStreamer uses pyrogram.session.Session/Auth, pyrogram.file_id, and
+# raw MTProto types — all private internals that could move between releases.
+# This guard catches a breaking upgrade at startup rather than at runtime
+# mid-stream.
+# ---------------------------------------------------------------------------
+import importlib.metadata as _meta
+try:
+    _pyro_ver = tuple(int(x) for x in _meta.version("pyrogram").split(".")[:2])
+except Exception:
+    _pyro_ver = (0, 0)
+
+_PYROGRAM_MIN = (2, 0)
+_PYROGRAM_MAX = (2, 99)   # bump when you've tested a new major series
+
+if not (_PYROGRAM_MIN <= _pyro_ver <= _PYROGRAM_MAX):
+    raise RuntimeError(
+        f"Pyrogram {'.'.join(str(x) for x in _pyro_ver)} is outside the "
+        f"tested range {_PYROGRAM_MIN}–{_PYROGRAM_MAX}. "
+        "ByteStreamer uses private internals (Session, Auth, file_id). "
+        "Review and re-test before widening this range."
+    )
 
 # ---------------------------------------------------
 # ENV
@@ -42,15 +70,24 @@ tg = Client(
 # ---------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global byte_streamer
     # Startup
     await tg.start()
+    byte_streamer = ByteStreamer(tg)
     try:
         await tg.get_chat(CHANNEL_USERNAME)
         print("âœ… Pyrogram started")
     except Exception as e:
         print(f"âš ï¸  Startup warning: {e}")
     yield
-    # Shutdown
+    # Shutdown - close any media sessions opened by ByteStreamer before
+    # stopping the client, so Railway restarts don't leave orphaned sessions.
+    for dc_id, session in list(tg.media_sessions.items()):
+        try:
+            await session.stop()
+        except Exception as e:
+            print(f"Warning: could not close media session DC{dc_id}: {e}")
+    tg.media_sessions.clear()
     await tg.stop()
     print("ðŸ›‘ Pyrogram stopped")
 
@@ -69,7 +106,7 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(6)   # limit parallel Telegram DC connections
+STREAM_LIMITER = asyncio.Semaphore(3)   # limit parallel Telegram DC connections
 
 # Cache variables
 STARTUP_CACHE: dict = {}
@@ -79,6 +116,207 @@ TAIL_LOCKS: dict    = {}
 CACHE_MAX_ITEMS     = 5
 
 TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
+
+# ---------------------------------------------------
+# BYTE STREAMER
+# ---------------------------------------------------
+class ByteStreamer:
+    """
+    Streams Telegram media directly via raw MTProto GetFile calls,
+    bypassing stream_media(). This allows byte-accurate range seeking
+    without 1 MB chunk alignment waste and avoids the extra Pyrogram
+    download layer.
+    """
+
+    def __init__(self, client: Client):
+        self.client: Client = client
+        self._file_id_cache: Dict[int, FileId] = {}
+        self._cache_lock: asyncio.Lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def get_file_id(self, msg) -> FileId:
+        """
+        Return a cached FileId for *msg*. The cache key is the message id.
+        """
+        msg_id = msg.id
+        async with self._cache_lock:
+            if msg_id in self._file_id_cache:
+                return self._file_id_cache[msg_id]
+            file_id = self._extract_file_id(msg)
+            self._file_id_cache[msg_id] = file_id
+            # Evict oldest entry if cache grows too large
+            if len(self._file_id_cache) > 200:
+                oldest = next(iter(self._file_id_cache))
+                del self._file_id_cache[oldest]
+            return file_id
+
+    async def yield_file(
+        self,
+        msg,
+        offset: int,           # byte offset (must be multiple of chunk_size)
+        first_part_cut: int,   # bytes to skip from the very first chunk
+        last_part_cut: int,    # bytes to keep from the very last chunk
+        part_count: int,       # total number of 1 MB chunks to fetch
+        chunk_size: int = TG_CHUNK_SIZE,
+    ) -> AsyncGenerator[bytes, None]:
+        """
+        Async generator that yields raw bytes for the requested range.
+        Offset must be aligned to chunk_size (callers are responsible).
+        """
+        file_id = await self.get_file_id(msg)
+        media_session = await self._get_media_session(file_id)
+        location = self._get_location(file_id)
+
+        current_part = 1
+        current_offset = offset
+
+        r = await media_session.invoke(
+            raw.functions.upload.GetFile(
+                location=location,
+                offset=current_offset,
+                limit=chunk_size,
+            )
+        )
+
+        if not isinstance(r, raw.types.upload.File):
+            return
+
+        while True:
+            chunk = r.bytes
+            if not chunk:
+                break
+
+            if part_count == 1:
+                yield chunk[first_part_cut:last_part_cut]
+            elif current_part == 1:
+                yield chunk[first_part_cut:]
+            elif current_part == part_count:
+                yield chunk[:last_part_cut]
+            else:
+                yield chunk
+
+            current_part += 1
+            current_offset += chunk_size
+
+            if current_part > part_count:
+                break
+
+            r = await media_session.invoke(
+                raw.functions.upload.GetFile(
+                    location=location,
+                    offset=current_offset,
+                    limit=chunk_size,
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_file_id(msg) -> FileId:
+        """Decode a Pyrogram FileId from the message's media object."""
+        media = msg.video or msg.document
+        if media is None:
+            raise ValueError("Message contains no streamable media")
+        return FileId.decode(media.file_id)
+
+    @staticmethod
+    def _get_location(file_id: FileId):
+        file_type = file_id.file_type
+        if file_type == FileType.CHAT_PHOTO:
+            if file_id.chat_id > 0:
+                peer = raw.types.InputPeerUser(
+                    user_id=file_id.chat_id,
+                    access_hash=file_id.chat_access_hash,
+                )
+            elif file_id.chat_access_hash == 0:
+                peer = raw.types.InputPeerChat(chat_id=-file_id.chat_id)
+            else:
+                peer = raw.types.InputPeerChannel(
+                    channel_id=utils.get_channel_id(file_id.chat_id),
+                    access_hash=file_id.chat_access_hash,
+                )
+            return raw.types.InputPeerPhotoFileLocation(
+                peer=peer,
+                volume_id=file_id.volume_id,
+                local_id=file_id.local_id,
+                big=file_id.thumbnail_source == ThumbnailSource.CHAT_PHOTO_BIG,
+            )
+        elif file_type == FileType.PHOTO:
+            return raw.types.InputPhotoFileLocation(
+                id=file_id.media_id,
+                access_hash=file_id.access_hash,
+                file_reference=file_id.file_reference,
+                thumb_size=file_id.thumbnail_size,
+            )
+        else:
+            return raw.types.InputDocumentFileLocation(
+                id=file_id.media_id,
+                access_hash=file_id.access_hash,
+                file_reference=file_id.file_reference,
+                thumb_size=file_id.thumbnail_size,
+            )
+
+    async def _get_media_session(self, file_id: FileId) -> Session:
+        """
+        Return (and cache) a dedicated media Session for the DC that
+        hosts this file. Creates a new one with exported auth if needed.
+        """
+        client = self.client
+        dc_id = file_id.dc_id
+
+        media_session = client.media_sessions.get(dc_id)
+        if media_session is not None:
+            return media_session
+
+        if dc_id != await client.storage.dc_id():
+            # Different DC: create a fresh session and import auth
+            media_session = Session(
+                client,
+                dc_id,
+                await Auth(client, dc_id, await client.storage.test_mode()).create(),
+                await client.storage.test_mode(),
+                is_media=True,
+            )
+            await media_session.start()
+
+            for _ in range(6):
+                exported = await client.invoke(
+                    raw.functions.auth.ExportAuthorization(dc_id=dc_id)
+                )
+                try:
+                    await media_session.invoke(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported.id, bytes=exported.bytes
+                        )
+                    )
+                    break
+                except AuthBytesInvalid:
+                    continue
+            else:
+                await media_session.stop()
+                raise AuthBytesInvalid
+        else:
+            # Same DC: reuse the client's own auth key
+            media_session = Session(
+                client,
+                dc_id,
+                await client.storage.auth_key(),
+                await client.storage.test_mode(),
+                is_media=True,
+            )
+            await media_session.start()
+
+        client.media_sessions[dc_id] = media_session
+        return media_session
+
+
+# Module-level singleton — created once the event loop is running
+byte_streamer: ByteStreamer = None  # initialised in lifespan
 
 # ---------------------------------------------------
 # HELPERS (Formatting & Pyrogram)
@@ -534,10 +772,13 @@ async def get_startup_cache(msg, movie_id: str):
 
         data = bytearray()
 
-        async for chunk in tg.stream_media(
+        # 8 chunks × 1 MB = 8 MB head segment
+        async for chunk in byte_streamer.yield_file(
             msg,
             offset=0,
-            limit=8,
+            first_part_cut=0,
+            last_part_cut=TG_CHUNK_SIZE,
+            part_count=8,
         ):
             data.extend(chunk)
 
@@ -569,11 +810,14 @@ async def get_tail_cache(msg, movie_id: str, file_size: int):
             
         offset = max(0, (file_size // TG_CHUNK_SIZE) - 8)
         data = bytearray()
-        
-        async for chunk in tg.stream_media(
+
+        # 8 chunks × 1 MB = 8 MB tail segment
+        async for chunk in byte_streamer.yield_file(
             msg,
-            offset=offset,
-            limit=8,
+            offset=offset * TG_CHUNK_SIZE,
+            first_part_cut=0,
+            last_part_cut=TG_CHUNK_SIZE,
+            part_count=8,
         ):
             data.extend(chunk)
             
@@ -593,68 +837,6 @@ async def get_tail_cache(msg, movie_id: str, file_size: int):
         
         return TAIL_CACHE[movie_id]
 
-# ---------------------------------------------------
-# PREFETCH STREAMER
-# ---------------------------------------------------
-class PrefetchStreamer:
-    def __init__(self, media_generator, queue_max_size: int = 4):
-        self.generator = media_generator
-        self.queue = asyncio.Queue(maxsize=queue_max_size)
-        self.worker_task = None
-        self.error = None
-
-    async def _producer(self):
-        try:
-            async for chunk in self.generator:
-                await self.queue.put(chunk)
-            await self.queue.put(None)
-        except Exception as e:
-            self.error = e
-            await self.queue.put(None)
-
-    def start(self):
-        self.worker_task = asyncio.create_task(self._producer())
-
-    async def chunk_generator(self, request: Request, skip_bytes: int, total_want: int, movie_id: str):
-        sent = 0
-        first = True
-        
-        try:
-            while sent < total_want:
-                if await request.is_disconnected():
-                    print(f"[{movie_id}] PREFETCH: CLIENT_DISCONNECTED")
-                    break
-
-                chunk = await self.queue.get()
-                
-                if chunk is None:
-                    if self.error:
-                        print(f"[{movie_id}] PREFETCH: Producer error: {self.error}")
-                        raise self.error
-                    break
-
-                if first:
-                    chunk = chunk[skip_bytes:]
-                    first = False
-
-                remaining = total_want - sent
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-
-                if chunk:
-                    sent += len(chunk)
-                    yield chunk
-                    
-                self.queue.task_done()
-
-        finally:
-            if self.worker_task and not self.worker_task.done():
-                self.worker_task.cancel()
-                try:
-                    await self.worker_task
-                except asyncio.CancelledError:
-                    pass
-
 
 # ---------------------------------------------------
 # PROXY / RANGE STREAMING
@@ -666,7 +848,18 @@ async def proxy_stream(movie_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Movie not found")
 
     t0  = time.time()
-    msg = await fetch_message(movie["message_id"])
+    try:
+        msg = await fetch_message(movie["message_id"])
+    except FloodWait as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Telegram FloodWait {e.value}s"
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Telegram unavailable"
+        )
     print(f"[{movie_id}] FETCH_MSG: {round(time.time() - t0, 3)}s")
 
     if is_empty(msg):
@@ -678,13 +871,20 @@ async def proxy_stream(movie_id: str, request: Request):
     filename  = movie.get("file_name", "video.mp4")
     ctype     = content_type_for(filename)
 
+    # Stable ETag: message_id is immutable; file_size catches re-uploads.
+    etag = f'"{movie["message_id"]}-{file_size}"'
+
     if request.method == "HEAD":
         return Response(
-            status_code=200,
+            status_code=206,
             headers={
                 "Accept-Ranges":  "bytes",
+                "Content-Range":  f"bytes 0-{file_size - 1}/{file_size}",
                 "Content-Length": str(file_size),
                 "Content-Type":   ctype,
+                "Cache-Control":  "public, max-age=3600",
+                "ETag":           etag,
+                "Vary":           "Range",
             },
         )
 
@@ -694,19 +894,29 @@ async def proxy_stream(movie_id: str, request: Request):
 
     print(f"RAW RANGE HEADER: {range_header}")
 
-    if range_header:
+    if range_header and range_header.startswith("bytes="):
         try:
-            parts = (
-                range_header[6:].split("-")
-                if range_header.startswith("bytes=")
-                else range_header.split("-")
+            range_spec = range_header[6:]
+
+            if range_spec.startswith("-"):
+                suffix = int(range_spec[1:])
+                start = max(0, file_size - suffix)
+                end = file_size - 1
+
+            else:
+                parts = range_spec.split("-")
+
+                if parts[0]:
+                    start = int(parts[0])
+
+                if len(parts) > 1 and parts[1]:
+                    end = int(parts[1])
+
+        except Exception:
+            raise HTTPException(
+                status_code=416,
+                detail="Invalid Range header"
             )
-            if parts[0]:
-                start = int(parts[0])
-            if len(parts) > 1 and parts[1]:
-                end = int(parts[1])
-        except ValueError:
-            pass
 
     if not range_header:
         end = min((8 * 1024 * 1024) - 1, file_size - 1)
@@ -721,26 +931,36 @@ async def proxy_stream(movie_id: str, request: Request):
     # STARTUP CACHE INTERCEPT
     # ---------------------------------------------------
     if start < 8 * 1024 * 1024:
-        cache = await get_startup_cache(msg, movie_id)
-        cache_end = min(end, len(cache) - 1)
+        cache = STARTUP_CACHE.get(movie_id)
 
-        if cache_end >= start:
-            print(f"[{movie_id}] CACHE_HIT")
-            return Response(
-                content=cache[start:cache_end + 1],
-                status_code=206,
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes {start}-{cache_end}/{file_size}",
-                    "Content-Length": str(cache_end - start + 1),
-                    "Content-Type": ctype,
-                },
+        if cache is None:
+            asyncio.create_task(
+                get_startup_cache(msg, movie_id)
             )
+        else:
+            cache_end = min(end, len(cache) - 1)
+
+            if cache_end >= start:
+                print(f"[{movie_id}] CACHE_HIT")
+
+                return Response(
+                    content=cache[start:cache_end + 1],
+                    status_code=206,
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes {start}-{cache_end}/{file_size}",
+                        "Content-Length": str(cache_end - start + 1),
+                        "Content-Type": ctype,
+                        "Cache-Control": "public, max-age=3600",
+                        "ETag":          etag,
+                        "Vary":          "Range",
+                    },
+                )
 
     # ---------------------------------------------------
     # TAIL CACHE INTERCEPT
     # ---------------------------------------------------
-    if start > file_size - (8 * 1024 * 1024):
+    if start >= file_size - (8 * 1024 * 1024):
         tail = await get_tail_cache(msg, movie_id, file_size)
         tail_start = tail["start"]
         tail_data = tail["data"]
@@ -758,33 +978,48 @@ async def proxy_stream(movie_id: str, request: Request):
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Content-Length": str(rel_end - rel_start + 1),
                     "Content-Type": ctype,
+                    "Cache-Control": "public, max-age=3600",
+                    "ETag":          etag,
+                    "Vary":          "Range",
                 },
             )
 
     # ---------------------------------------------------
-    # MID-FILE: Stream from Telegram via Pyrogram
+    # MID-FILE: Stream from Telegram via ByteStreamer
     # ---------------------------------------------------
-    chunk_size  = TG_CHUNK_SIZE
-    offset      = start // chunk_size
-    skip_bytes  = start % chunk_size
-    total_want  = end - start + 1
-    num_chunks  = (skip_bytes + total_want + chunk_size - 1) // chunk_size
+    chunk_size      = TG_CHUNK_SIZE
+    # Align offset down to a chunk boundary
+    aligned_offset  = (start // chunk_size) * chunk_size
+    first_part_cut  = start - aligned_offset          # bytes to skip in first chunk
+    last_part_cut   = (end % chunk_size) + 1          # bytes to keep from last chunk
+    part_count      = math.ceil((end + 1) / chunk_size) - (aligned_offset // chunk_size)
+    total_want      = end - start + 1
 
     print(
         f"[{movie_id}] RANGE=bytes={start}-{end} "
         f"START={start} END={end} SIZE={total_want/1024/1024:.2f}MB"
     )
-    print(f"[{movie_id}] OFFSET={offset} SKIP={skip_bytes} CHUNKS={num_chunks}")
+    print(
+        f"[{movie_id}] OFFSET={aligned_offset} FIRST_CUT={first_part_cut} "
+        f"LAST_CUT={last_part_cut} PARTS={part_count}"
+    )
 
     async def _stream():
         t_start = time.time()
         sent    = 0
         async with STREAM_LIMITER:
-            print(f"[{movie_id}] PREFETCH: Pipeline started actively.")
-            media_gen = tg.stream_media(msg, offset=offset, limit=num_chunks)
-            streamer  = PrefetchStreamer(media_gen)
-            streamer.start()
-            async for chunk in streamer.chunk_generator(request, skip_bytes, total_want, movie_id):
+            print(f"[{movie_id}] BYTESTREAMER: Pipeline started.")
+            async for chunk in byte_streamer.yield_file(
+                msg,
+                offset=aligned_offset,
+                first_part_cut=first_part_cut,
+                last_part_cut=last_part_cut,
+                part_count=part_count,
+                chunk_size=chunk_size,
+            ):
+                if await request.is_disconnected():
+                    print(f"[{movie_id}] BYTESTREAMER: CLIENT_DISCONNECTED")
+                    break
                 sent += len(chunk)
                 yield chunk
         elapsed = round(time.time() - t_start, 3)
@@ -798,6 +1033,9 @@ async def proxy_stream(movie_id: str, request: Request):
             "Content-Range":  f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(total_want),
             "Content-Type":   ctype,
+            "Cache-Control":  "public, max-age=3600",
+            "ETag":           etag,
+            "Vary":           "Range",
         },
         media_type=ctype,
     )
