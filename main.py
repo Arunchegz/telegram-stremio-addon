@@ -47,7 +47,6 @@ API_HASH           = os.getenv("API_HASH", "")
 SESSION_STRING     = os.getenv("SESSION_STRING", "")
 BASE_URL           = os.getenv("BASE_URL", "")
 CHANNEL_USERNAME   = os.getenv("CHANNEL_USERNAME", "")
-SYNC_STALE_MINUTES = int(os.getenv("SYNC_STALE_MINUTES", "60"))
 DB_FILE            = "movies.json"
 
 # ---------------------------------------------------
