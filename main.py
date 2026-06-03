@@ -364,25 +364,36 @@ def content_type_for(filename: str) -> str:
 # HELPERS (IMDb Matching & String parsing)
 # ---------------------------------------------------
 def normalize(text: str):
+    if not text:
+        return ""
     text = text.lower()
-    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    # Replace common separators with spaces
+    text = re.sub(r"[._\-–—+]", " ", text)
+    # Remove remaining non-alphanumeric characters
+    text = re.sub(r"[^a-z0-9 ]", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def flexible_match(title: str, filename: str):
     title_n = normalize(title)
-    file_n  = normalize(filename)
-    words   = title_n.split()
-
-    if not words:
+    file_n = normalize(filename)
+    
+    if not title_n or not file_n:
         return False
-
-    matched = sum(1 for w in words if w in file_n)
-
-    if len(words) <= 2:
-        required = len(words)
-    else:
-        required = max(2, len(words) // 2)
+        
+    # Direct matching check
+    if title_n in file_n:
+        return True
+        
+    # Token matching fall-back
+    title_words = set(title_n.split())
+    file_words = set(file_n.split())
+    
+    if not title_words:
+        return False
+        
+    intersection = title_words.intersection(file_words)
+    return len(intersection) >= max(1, len(title_words) // 2)
 
     return matched >= required
 
