@@ -550,26 +550,21 @@ async def get_manifest():
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
     global last_sync_time
-    movies = load_movies()
-    now = time.time()
-    stale = (now - last_sync_time) > (SYNC_STALE_MINUTES * 60)
 
-    if not movies:
-        # First time or empty DB — block until synced
+    movies = load_movies()
+
+    # Sync when catalog is opened, but only once every 2 minutes
+    now = time.time()
+
+    if (now - last_sync_time) > 120:
         count = await sync_channel()
         movies = load_movies()
-
-# Sync when catalog is opened, but only once every 2 minutes
-now = time.time()
-
-if (now - last_sync_time) > 120:
-    count = await sync_channel()
-    movies = load_movies()
-    print(f"🔄 Catalog sync: {count} movies")
+        print(f"🔄 Catalog sync: {count} movies")
 
     async def build_meta(mid, m):
         filename = m.get("file_name", "Unknown")
         poster   = await fetch_tmdb_poster(filename)
+
         return {
             "id":          f"tg:{mid}",
             "type":        "movie",
@@ -578,7 +573,9 @@ if (now - last_sync_time) > 120:
             "posterShape": "poster",
         }
 
-    metas = await asyncio.gather(*[build_meta(mid, m) for mid, m in movies.items()])
+    metas = await asyncio.gather(
+        *[build_meta(mid, m) for mid, m in movies.items()]
+    )
 
     return JSONResponse(
         {"metas": list(metas)},
