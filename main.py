@@ -42,13 +42,12 @@ if not (_PYROGRAM_MIN <= _pyro_ver <= _PYROGRAM_MAX):
 # ---------------------------------------------------
 # ENV
 # ---------------------------------------------------
-API_ID             = int(os.getenv("API_ID", "0"))
-API_HASH           = os.getenv("API_HASH", "")
-SESSION_STRING     = os.getenv("SESSION_STRING", "")
-BASE_URL           = os.getenv("BASE_URL", "")
-CHANNEL_USERNAME   = os.getenv("CHANNEL_USERNAME", "")
-SYNC_STALE_MINUTES = int(os.getenv("SYNC_STALE_MINUTES", "60"))
-DB_FILE            = "movies.json"
+API_ID         = int(os.getenv("API_ID", "0"))
+API_HASH       = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
+BASE_URL       = os.getenv("BASE_URL", "")
+CHANNEL_ID     = int(os.getenv("CHANNEL_ID", "0"))
+DB_FILE        = "movies.json"
 
 # ---------------------------------------------------
 # PYROGRAM CLIENT
@@ -63,7 +62,7 @@ tg = Client(
 )
 
 # ---------------------------------------------------
-# FASTAPI LIFESPAN
+# FASTAPI
 # ---------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -72,7 +71,7 @@ async def lifespan(app: FastAPI):
     await tg.start()
     byte_streamer = ByteStreamer(tg)
     try:
-        await tg.get_chat(CHANNEL_USERNAME)
+        await tg.get_chat(CHANNEL_ID)
         print("✅ Pyrogram started")
     except Exception as e:
         print(f"⚠️ Startup warning: {e}")
@@ -110,7 +109,6 @@ TAIL_CACHE: dict    = {}
 TAIL_LOCKS: dict    = {}
 CACHE_MAX_ITEMS     = 5
 
-last_sync_time: float = 0.0  # Unix timestamp, 0 = never synced
 TG_CHUNK_SIZE = 1024 * 1024
 
 # ---------------------------------------------------
@@ -455,14 +453,13 @@ def is_empty(msg) -> bool:
 
 
 async def fetch_message(message_id: int):
-    return await tg.get_messages(CHANNEL_USERNAME, message_id)
+    return await tg.get_messages(CHANNEL_ID, message_id)
 
 
 async def sync_channel() -> int:
-    global last_sync_time
     async with SYNC_LOCK:
         current: dict = {}
-        async for msg in tg.get_chat_history(CHANNEL_USERNAME):
+        async for msg in tg.get_chat_history(CHANNEL_ID):
             try:
                 media = get_media(msg)
                 if not media:
@@ -483,18 +480,14 @@ async def sync_channel() -> int:
                 continue
 
         save_movies(current)
-        last_sync_time = time.time()
         print(f"✅ Sync complete: {len(current)} movies")
         return len(current)
 
 
-# ---------------------------------------------------
-# ROUTES
-# ---------------------------------------------------
 @app.get("/")
 async def home():
     movies = load_movies()
-    return {"status": "running", "movies": len(movies), "channel": CHANNEL_USERNAME}
+    return {"status": "running", "movies": len(movies), "channel": CHANNEL_ID}
 
 
 @app.get("/sync")
@@ -505,12 +498,11 @@ async def sync_route():
 
 @app.get("/reset")
 async def reset():
-    global MOVIES_CACHE, last_sync_time
+    global MOVIES_CACHE
     try:
         if os.path.exists(DB_FILE):
             os.remove(DB_FILE)
         MOVIES_CACHE = {}
-        last_sync_time = 0.0
         return {"status": "database cleared"}
     except Exception as e:
         return {"error": str(e)}
@@ -550,22 +542,7 @@ async def get_manifest():
 
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
-    global last_sync_time
     movies = load_movies()
-    now = time.time()
-    stale = (now - last_sync_time) > (SYNC_STALE_MINUTES * 60)
-
-    if not movies:
-        # First time or empty DB — block until synced
-        count = await sync_channel()
-        movies = load_movies()
-        print(f"🔄 Blocking sync on empty DB: {count} movies")
-    elif stale:
-        # Data exists but is old — refresh in background, serve current cache immediately
-        async def _bg_sync():
-            count = await sync_channel()
-            print(f"🔄 Background sync complete: {count} movies")
-        asyncio.create_task(_bg_sync())
 
     async def build_meta(mid, m):
         filename = m.get("file_name", "Unknown")
