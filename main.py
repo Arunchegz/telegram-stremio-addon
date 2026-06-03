@@ -339,21 +339,22 @@ def normalize(text: str):
 def flexible_match(title: str, filename: str):
     title_n = normalize(title)
     file_n = normalize(filename)
-    
+
     if not title_n or not file_n:
         return False
-        
+
     if title_n in file_n:
         return True
-        
-    title_words = set(title_n.split())
-    file_words = set(file_n.split())
-    
-    if not title_words:
-        return False
-        
-    intersection = title_words.intersection(file_words)
-    return len(intersection) >= max(1, len(title_words) // 2)
+
+    title_words = title_n.split()
+    file_words = file_n.split()
+
+    matches = sum(
+        1 for word in title_words
+        if word in file_words
+    )
+
+    return matches >= max(1, len(title_words) * 0.7)
 
 
 async def get_cinemeta(type_name: str, imdb_id: str):
