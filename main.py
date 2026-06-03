@@ -46,7 +46,11 @@ API_ID         = int(os.getenv("API_ID", "0"))
 API_HASH       = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 BASE_URL       = os.getenv("BASE_URL", "")
-CHANNEL_ID     = int(os.getenv("CHANNEL_ID", "0"))
+from pyrogram.utils import get_channel_id
+
+# This normalizes -1003670002074 down to a format Pyrogram's compiler handles cleanly
+raw_channel_id = int(os.getenv("CHANNEL_ID", "0"))
+CHANNEL_ID     = get_channel_id(raw_channel_id)
 DB_FILE        = "movies.json"
 
 # ---------------------------------------------------
