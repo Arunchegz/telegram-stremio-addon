@@ -559,13 +559,14 @@ async def catalog():
         # First time or empty DB — block until synced
         count = await sync_channel()
         movies = load_movies()
-        print(f"🔄 Blocking sync on empty DB: {count} movies")
-    elif stale:
-        # Data exists but is old — refresh in background, serve current cache immediately
-        async def _bg_sync():
-            count = await sync_channel()
-            print(f"🔄 Background sync complete: {count} movies")
-        asyncio.create_task(_bg_sync())
+
+# Sync when catalog is opened, but only once every 2 minutes
+now = time.time()
+
+if (now - last_sync_time) > 120:
+    count = await sync_channel()
+    movies = load_movies()
+    print(f"🔄 Catalog sync: {count} movies")
 
     async def build_meta(mid, m):
         filename = m.get("file_name", "Unknown")
