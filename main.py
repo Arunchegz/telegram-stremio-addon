@@ -21,10 +21,6 @@ from typing import AsyncGenerator, Dict, Union
 
 # ---------------------------------------------------------------------------
 # Pyrogram internal-API version guard
-# ByteStreamer uses pyrogram.session.Session/Auth, pyrogram.file_id, and
-# raw MTProto types — all private internals that could move between releases.
-# This guard catches a breaking upgrade at startup rather than at runtime
-# mid-stream.
 # ---------------------------------------------------------------------------
 import importlib.metadata as _meta
 try:
@@ -33,7 +29,7 @@ except Exception:
     _pyro_ver = (0, 0)
 
 _PYROGRAM_MIN = (2, 0)
-_PYROGRAM_MAX = (2, 99)   # bump when you've tested a new major series
+_PYROGRAM_MAX = (2, 99)
 
 if not (_PYROGRAM_MIN <= _pyro_ver <= _PYROGRAM_MAX):
     raise RuntimeError(
@@ -76,12 +72,11 @@ async def lifespan(app: FastAPI):
     byte_streamer = ByteStreamer(tg)
     try:
         await tg.get_chat(CHANNEL_USERNAME)
-        print("âœ… Pyrogram started")
+        print("✅ Pyrogram started")
     except Exception as e:
-        print(f"âš ï¸  Startup warning: {e}")
+        print(f"⚠️ Startup warning: {e}")
     yield
-    # Shutdown - close any media sessions opened by ByteStreamer before
-    # stopping the client, so Railway restarts don't leave orphaned sessions.
+    # Shutdown
     for dc_id, session in list(tg.media_sessions.items()):
         try:
             await session.stop()
@@ -89,7 +84,7 @@ async def lifespan(app: FastAPI):
             print(f"Warning: could not close media session DC{dc_id}: {e}")
     tg.media_sessions.clear()
     await tg.stop()
-    print("ðŸ›‘ Pyrogram stopped")
+    print("🛑 Pyrogram stopped")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -106,48 +101,35 @@ app.add_middleware(
 # ---------------------------------------------------
 MOVIES_CACHE: dict = {}
 SYNC_LOCK     = asyncio.Lock()
-STREAM_LIMITER = asyncio.Semaphore(3)   # limit parallel Telegram DC connections
+STREAM_LIMITER = asyncio.Semaphore(3)
 
-# Cache variables
 STARTUP_CACHE: dict = {}
 STARTUP_LOCKS: dict = {}
 TAIL_CACHE: dict    = {}
 TAIL_LOCKS: dict    = {}
 CACHE_MAX_ITEMS     = 5
 
-TG_CHUNK_SIZE = 1024 * 1024             # Telegram's native 1 MB chunk (do not change)
+TG_CHUNK_SIZE = 1024 * 1024
 
 # ---------------------------------------------------
 # BYTE STREAMER
 # ---------------------------------------------------
 class ByteStreamer:
     """
-    Streams Telegram media directly via raw MTProto GetFile calls,
-    bypassing stream_media(). This allows byte-accurate range seeking
-    without 1 MB chunk alignment waste and avoids the extra Pyrogram
-    download layer.
+    Streams Telegram media directly via raw MTProto GetFile calls.
     """
-
     def __init__(self, client: Client):
         self.client: Client = client
         self._file_id_cache: Dict[int, FileId] = {}
         self._cache_lock: asyncio.Lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     async def get_file_id(self, msg) -> FileId:
-        """
-        Return a cached FileId for *msg*. The cache key is the message id.
-        """
         msg_id = msg.id
         async with self._cache_lock:
             if msg_id in self._file_id_cache:
                 return self._file_id_cache[msg_id]
             file_id = self._extract_file_id(msg)
             self._file_id_cache[msg_id] = file_id
-            # Evict oldest entry if cache grows too large
             if len(self._file_id_cache) > 200:
                 oldest = next(iter(self._file_id_cache))
                 del self._file_id_cache[oldest]
@@ -156,16 +138,12 @@ class ByteStreamer:
     async def yield_file(
         self,
         msg,
-        offset: int,           # byte offset (must be multiple of chunk_size)
-        first_part_cut: int,   # bytes to skip from the very first chunk
-        last_part_cut: int,    # bytes to keep from the very last chunk
-        part_count: int,       # total number of 1 MB chunks to fetch
+        offset: int,
+        first_part_cut: int,
+        last_part_cut: int,
+        part_count: int,
         chunk_size: int = TG_CHUNK_SIZE,
     ) -> AsyncGenerator[bytes, None]:
-        """
-        Async generator that yields raw bytes for the requested range.
-        Offset must be aligned to chunk_size (callers are responsible).
-        """
         file_id = await self.get_file_id(msg)
         media_session = await self._get_media_session(file_id)
         location = self._get_location(file_id)
@@ -212,13 +190,8 @@ class ByteStreamer:
                 )
             )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _extract_file_id(msg) -> FileId:
-        """Decode a Pyrogram FileId from the message's media object."""
         media = msg.video or msg.document
         if media is None:
             raise ValueError("Message contains no streamable media")
@@ -262,10 +235,6 @@ class ByteStreamer:
             )
 
     async def _get_media_session(self, file_id: FileId) -> Session:
-        """
-        Return (and cache) a dedicated media Session for the DC that
-        hosts this file. Creates a new one with exported auth if needed.
-        """
         client = self.client
         dc_id = file_id.dc_id
 
@@ -274,7 +243,6 @@ class ByteStreamer:
             return media_session
 
         if dc_id != await client.storage.dc_id():
-            # Different DC: create a fresh session and import auth
             media_session = Session(
                 client,
                 dc_id,
@@ -301,7 +269,6 @@ class ByteStreamer:
                 await media_session.stop()
                 raise AuthBytesInvalid
         else:
-            # Same DC: reuse the client's own auth key
             media_session = Session(
                 client,
                 dc_id,
@@ -315,11 +282,10 @@ class ByteStreamer:
         return media_session
 
 
-# Module-level singleton — created once the event loop is running
-byte_streamer: ByteStreamer = None  # initialised in lifespan
+byte_streamer: ByteStreamer = None
 
 # ---------------------------------------------------
-# HELPERS (Formatting & Pyrogram)
+# HELPERS
 # ---------------------------------------------------
 def format_size(size) -> str:
     if not size:
@@ -360,16 +326,12 @@ def content_type_for(filename: str) -> str:
         return "video/webm"
     return "video/mp4"
 
-# ---------------------------------------------------
-# HELPERS (IMDb Matching & String parsing)
-# ---------------------------------------------------
+
 def normalize(text: str):
     if not text:
         return ""
     text = text.lower()
-    # Replace common separators with spaces
     text = re.sub(r"[._\-–—+]", " ", text)
-    # Remove remaining non-alphanumeric characters
     text = re.sub(r"[^a-z0-9 ]", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -381,11 +343,9 @@ def flexible_match(title: str, filename: str):
     if not title_n or not file_n:
         return False
         
-    # Direct matching check
     if title_n in file_n:
         return True
         
-    # Token matching fall-back
     title_words = set(title_n.split())
     file_words = set(file_n.split())
     
@@ -394,8 +354,6 @@ def flexible_match(title: str, filename: str):
         
     intersection = title_words.intersection(file_words)
     return len(intersection) >= max(1, len(title_words) // 2)
-
-    return matched >= required
 
 
 async def get_cinemeta(type_name: str, imdb_id: str):
@@ -412,22 +370,14 @@ async def get_cinemeta(type_name: str, imdb_id: str):
         return ("", "")
 
 
-# ---------------------------------------------------
-# POSTER HELPERS
-# ---------------------------------------------------
 POSTER_CACHE: dict = {}
 
 def parse_title_year(filename: str):
-    """Extract clean title and year from a release filename."""
     name = filename
-    # strip extension
     name = re.sub(r"\.[a-zA-Z0-9]{2,4}$", "", name)
-    # replace dots/underscores with spaces
     name = re.sub(r"[._]", " ", name)
-    # find year
     year_match = re.search(r"\b(19|20)\d{2}\b", name)
     year = year_match.group(0) if year_match else ""
-    # cut title at year or common release tags
     cut = re.split(
         r"\b(?:19|20)\d{2}\b|\b(?:1080p|2160p|720p|480p|bluray|webrip|web dl|bdrip|hdrip|remux|x264|x265|hevc|avc|h264|h265|aac|dts|atmos|10bit)\b",
         name, maxsplit=1, flags=re.IGNORECASE
@@ -437,7 +387,6 @@ def parse_title_year(filename: str):
 
 
 async def fetch_tmdb_poster(filename: str) -> str:
-    """Return a TMDB poster URL for the given filename, or fallback placeholder."""
     if filename in POSTER_CACHE:
         return POSTER_CACHE[filename]
 
@@ -449,7 +398,7 @@ async def fetch_tmdb_poster(filename: str) -> str:
         query = f"{title} {year}".strip()
         url   = f"https://v3-cinemeta.strem.io/catalog/movie/top/search={query}.json"
         async with httpx.AsyncClient(timeout=8) as client:
-            r    = await client.get(url)
+            r     = await client.get(url)
             metas = r.json().get("metas", [])
             if metas and metas[0].get("poster"):
                 poster = metas[0]["poster"]
@@ -463,9 +412,6 @@ async def fetch_tmdb_poster(filename: str) -> str:
     return fallback
 
 
-# ---------------------------------------------------
-# DB
-# ---------------------------------------------------
 def load_movies() -> dict:
     global MOVIES_CACHE
     if MOVIES_CACHE:
@@ -494,14 +440,10 @@ def remove_movie(movie_id: str) -> None:
     if movie_id in movies:
         del movies[movie_id]
         save_movies(movies)
-        print(f"ðŸ—‘ï¸  Removed deleted media: {movie_id}")
+        print(f"🗑️ Removed deleted media: {movie_id}")
 
 
-# ---------------------------------------------------
-# TELEGRAM HELPERS
-# ---------------------------------------------------
 def get_media(msg):
-    """Return video or document from a message, or None."""
     return msg.video or msg.document or None
 
 
@@ -513,11 +455,7 @@ async def fetch_message(message_id: int):
     return await tg.get_messages(CHANNEL_USERNAME, message_id)
 
 
-# ---------------------------------------------------
-# SYNC
-# ---------------------------------------------------
 async def sync_channel() -> int:
-    """Fetch all media from the Telegram channel and persist to DB."""
     async with SYNC_LOCK:
         current: dict = {}
         async for msg in tg.get_chat_history(CHANNEL_USERNAME):
@@ -541,13 +479,10 @@ async def sync_channel() -> int:
                 continue
 
         save_movies(current)
-        print(f"âœ… Sync complete: {len(current)} movies")
+        print(f"✅ Sync complete: {len(current)} movies")
         return len(current)
 
 
-# ---------------------------------------------------
-# UTILITY ROUTES
-# ---------------------------------------------------
 @app.get("/")
 async def home():
     movies = load_movies()
@@ -577,9 +512,6 @@ async def debug():
     return load_movies()
 
 
-# ---------------------------------------------------
-# STREMIO MANIFEST
-# ---------------------------------------------------
 MANIFEST = {
     "id": "org.arun.telegram",
     "version": "1.0.0",
@@ -607,9 +539,6 @@ async def get_manifest():
     return JSONResponse(MANIFEST)
 
 
-# ---------------------------------------------------
-# STREMIO CATALOG
-# ---------------------------------------------------
 @app.get("/catalog/movie/telegrammovies.json")
 async def catalog():
     movies = load_movies()
@@ -633,12 +562,8 @@ async def catalog():
     )
 
 
-# ---------------------------------------------------
-# STREMIO META
-# ---------------------------------------------------
 @app.get("/meta/movie/{id}.json")
 async def meta(id: str):
-    # Handle IMDb requests
     if id.startswith("tt"):
         title, year = await get_cinemeta("movie", id)
         return JSONResponse({
@@ -650,7 +575,6 @@ async def meta(id: str):
             }
         })
 
-    # Handle internal Telegram Catalog requests
     clean_id = id[3:] if id.startswith("tg:") else id
     movie    = load_movies().get(clean_id)
     if not movie:
@@ -672,16 +596,10 @@ async def meta(id: str):
     })
 
 
-# ---------------------------------------------------
-# STREMIO STREAM
-# ---------------------------------------------------
 @app.get("/stream/movie/{id}.json")
 async def stream(id: str):
     movies = load_movies()
 
-    # ---------------------------------------------------
-    # IMDb Matcher (Discover Page)
-    # ---------------------------------------------------
     if id.startswith("tt"):
         movie_title, movie_year = await get_cinemeta("movie", id)
         if not movie_title:
@@ -694,7 +612,6 @@ async def stream(id: str):
             if not flexible_match(movie_title, name):
                 continue
 
-            # Year validation: allow Â±1 year tolerance (encode/release year drift)
             if movie_year:
                 try:
                     my = int(movie_year)
@@ -708,7 +625,7 @@ async def stream(id: str):
             size    = m.get("file_size_text", "Unknown")
             source  = m.get("source", "")
             src_tag = f" | {source}" if source else ""
-title = f"{name}\n{quality}{src_tag} | {size}"
+            title   = f"{name}\n{quality}{src_tag} | {size}"
 
             streams.append({
                 "name":  "Telegram",
@@ -718,9 +635,6 @@ title = f"{name}\n{quality}{src_tag} | {size}"
 
         return JSONResponse({"streams": streams})
 
-    # ---------------------------------------------------
-    # Internal Catalog Streamer (Telegram Addon Page)
-    # ---------------------------------------------------
     else:
         clean_id = id[3:] if id.startswith("tg:") else id
         movie    = movies.get(clean_id)
@@ -731,8 +645,8 @@ title = f"{name}\n{quality}{src_tag} | {size}"
         quality = movie.get("quality", "Unknown")
         size    = movie.get("file_size_text", "Unknown")
         source  = movie.get("source", "")
-        src_tag = f" | ðŸ·ï¸ {source}" if source else ""
-        title   = f"{name}\nâš™ï¸ {quality}{src_tag} | ðŸ’¾ {size}"
+        src_tag = f" | 🏷️ {source}" if source else ""
+        title   = f"{name}\n⚙️ {quality}{src_tag} | 💾 {size}"
 
         try:
             msg = await fetch_message(movie["message_id"])
@@ -740,37 +654,28 @@ title = f"{name}\n{quality}{src_tag} | {size}"
                 remove_movie(clean_id)
                 return JSONResponse({"streams": []})
 
-            # Warm startup cache in background
             if clean_id not in STARTUP_CACHE:
-                asyncio.create_task(
-                    get_startup_cache(msg, clean_id)
-                )
+                asyncio.create_task(get_startup_cache(msg, clean_id))
 
-            # Warm tail cache in background
             file_size = movie.get("file_size")
             if file_size and clean_id not in TAIL_CACHE:
-                asyncio.create_task(
-                    get_tail_cache(msg, clean_id, file_size)
-                )
+                asyncio.create_task(get_tail_cache(msg, clean_id, file_size))
                 
         except Exception as e:
-            print(f"âŒ Stream fetch error: {e}")
+            print(f"❌ Stream fetch error: {e}")
             return JSONResponse({"streams": []})
 
         return JSONResponse({
-    "streams": [
-        {
-            "name": "Telegram",
-            "title": title,
-            "url": f"{BASE_URL}/proxy/{clean_id}",
-        }
-    ]
-})
+            "streams": [
+                {
+                    "name": "Telegram",
+                    "title": title,
+                    "url": f"{BASE_URL}/proxy/{clean_id}",
+                }
+            ]
+        })
 
 
-# ---------------------------------------------------
-# STARTUP CACHE FUNCTION
-# ---------------------------------------------------
 async def get_startup_cache(msg, movie_id: str):
     if movie_id in STARTUP_CACHE:
         return STARTUP_CACHE[movie_id]
@@ -782,8 +687,6 @@ async def get_startup_cache(msg, movie_id: str):
             return STARTUP_CACHE[movie_id]
 
         data = bytearray()
-
-        # 8 chunks × 1 MB = 8 MB head segment
         async for chunk in byte_streamer.yield_file(
             msg,
             offset=0,
@@ -799,16 +702,10 @@ async def get_startup_cache(msg, movie_id: str):
             oldest = next(iter(STARTUP_CACHE))
             del STARTUP_CACHE[oldest]
 
-        print(
-            f"[{movie_id}] STARTUP_CACHE_BUILT "
-            f"{len(data)/1024/1024:.2f}MB"
-        )
-
+        print(f"[{movie_id}] STARTUP_CACHE_BUILT {len(data)/1024/1024:.2f}MB")
         return STARTUP_CACHE[movie_id]
 
-# ---------------------------------------------------
-# TAIL CACHE FUNCTION
-# ---------------------------------------------------
+
 async def get_tail_cache(msg, movie_id: str, file_size: int):
     if movie_id in TAIL_CACHE:
         return TAIL_CACHE[movie_id]
@@ -822,7 +719,6 @@ async def get_tail_cache(msg, movie_id: str, file_size: int):
         offset = max(0, (file_size // TG_CHUNK_SIZE) - 8)
         data = bytearray()
 
-        # 8 chunks × 1 MB = 8 MB tail segment
         async for chunk in byte_streamer.yield_file(
             msg,
             offset=offset * TG_CHUNK_SIZE,
@@ -841,17 +737,10 @@ async def get_tail_cache(msg, movie_id: str, file_size: int):
             oldest = next(iter(TAIL_CACHE))
             del TAIL_CACHE[oldest]
             
-        print(
-            f"[{movie_id}] TAIL_CACHE_BUILT "
-            f"{len(data)/1024/1024:.2f}MB"
-        )
-        
+        print(f"[{movie_id}] TAIL_CACHE_BUILT {len(data)/1024/1024:.2f}MB")
         return TAIL_CACHE[movie_id]
 
 
-# ---------------------------------------------------
-# PROXY / RANGE STREAMING
-# ---------------------------------------------------
 @app.api_route("/proxy/{movie_id}", methods=["GET", "HEAD"])
 async def proxy_stream(movie_id: str, request: Request):
     movie = load_movies().get(movie_id)
@@ -862,15 +751,9 @@ async def proxy_stream(movie_id: str, request: Request):
     try:
         msg = await fetch_message(movie["message_id"])
     except FloodWait as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Telegram FloodWait {e.value}s"
-        )
+        raise HTTPException(status_code=503, detail=f"Telegram FloodWait {e.value}s")
     except Exception:
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram unavailable"
-        )
+        raise HTTPException(status_code=502, detail="Telegram unavailable")
     print(f"[{movie_id}] FETCH_MSG: {round(time.time() - t0, 3)}s")
 
     if is_empty(msg):
@@ -881,9 +764,7 @@ async def proxy_stream(movie_id: str, request: Request):
     file_size = movie.get("file_size") or media.file_size
     filename  = movie.get("file_name", "video.mp4")
     ctype     = content_type_for(filename)
-
-    # Stable ETag: message_id is immutable; file_size catches re-uploads.
-    etag = f'"{movie["message_id"]}-{file_size}"'
+    etag      = f'"{movie["message_id"]}-{file_size}"'
 
     if request.method == "HEAD":
         return Response(
@@ -899,35 +780,25 @@ async def proxy_stream(movie_id: str, request: Request):
             },
         )
 
-    # Parse Range header
     start, end = 0, file_size - 1
     range_header = request.headers.get("range")
-
     print(f"RAW RANGE HEADER: {range_header}")
 
     if range_header and range_header.startswith("bytes="):
         try:
             range_spec = range_header[6:]
-
             if range_spec.startswith("-"):
                 suffix = int(range_spec[1:])
                 start = max(0, file_size - suffix)
                 end = file_size - 1
-
             else:
                 parts = range_spec.split("-")
-
                 if parts[0]:
                     start = int(parts[0])
-
                 if len(parts) > 1 and parts[1]:
                     end = int(parts[1])
-
         except Exception:
-            raise HTTPException(
-                status_code=416,
-                detail="Invalid Range header"
-            )
+            raise HTTPException(status_code=416, detail="Invalid Range header")
 
     if not range_header:
         end = min((8 * 1024 * 1024) - 1, file_size - 1)
@@ -938,22 +809,14 @@ async def proxy_stream(movie_id: str, request: Request):
 
     print(f"Player requested range: {start}-{end}")
     
-    # ---------------------------------------------------
-    # STARTUP CACHE INTERCEPT
-    # ---------------------------------------------------
     if start < 8 * 1024 * 1024:
         cache = STARTUP_CACHE.get(movie_id)
-
         if cache is None:
-            asyncio.create_task(
-                get_startup_cache(msg, movie_id)
-            )
+            asyncio.create_task(get_startup_cache(msg, movie_id))
         else:
             cache_end = min(end, len(cache) - 1)
-
             if cache_end >= start:
                 print(f"[{movie_id}] CACHE_HIT")
-
                 return Response(
                     content=cache[start:cache_end + 1],
                     status_code=206,
@@ -968,9 +831,6 @@ async def proxy_stream(movie_id: str, request: Request):
                     },
                 )
 
-    # ---------------------------------------------------
-    # TAIL CACHE INTERCEPT
-    # ---------------------------------------------------
     if start >= file_size - (8 * 1024 * 1024):
         tail = await get_tail_cache(msg, movie_id, file_size)
         tail_start = tail["start"]
@@ -995,25 +855,15 @@ async def proxy_stream(movie_id: str, request: Request):
                 },
             )
 
-    # ---------------------------------------------------
-    # MID-FILE: Stream from Telegram via ByteStreamer
-    # ---------------------------------------------------
     chunk_size      = TG_CHUNK_SIZE
-    # Align offset down to a chunk boundary
     aligned_offset  = (start // chunk_size) * chunk_size
-    first_part_cut  = start - aligned_offset          # bytes to skip in first chunk
-    last_part_cut   = (end % chunk_size) + 1          # bytes to keep from last chunk
+    first_part_cut  = start - aligned_offset
+    last_part_cut   = (end % chunk_size) + 1
     part_count      = math.ceil((end + 1) / chunk_size) - (aligned_offset // chunk_size)
     total_want      = end - start + 1
 
-    print(
-        f"[{movie_id}] RANGE=bytes={start}-{end} "
-        f"START={start} END={end} SIZE={total_want/1024/1024:.2f}MB"
-    )
-    print(
-        f"[{movie_id}] OFFSET={aligned_offset} FIRST_CUT={first_part_cut} "
-        f"LAST_CUT={last_part_cut} PARTS={part_count}"
-    )
+    print(f"[{movie_id}] RANGE=bytes={start}-{end} START={start} END={end} SIZE={total_want/1024/1024:.2f}MB")
+    print(f"[{movie_id}] OFFSET={aligned_offset} FIRST_CUT={first_part_cut} LAST_CUT={last_part_cut} PARTS={part_count}")
 
     async def _stream():
         t_start = time.time()
@@ -1052,20 +902,12 @@ async def proxy_stream(movie_id: str, request: Request):
     )
 
 
-# ---------------------------------------------------
-# TELEGRAM WEBHOOK (placeholder â€“ set via Bot API)
-# ---------------------------------------------------
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
-    """
-    Receives Telegram Bot API webhook updates.
-    Extend this handler to process bot commands or messages.
-    """
     try:
         update = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+    return JSONResponse({"ok": True})
 
-    # TODO: add your bot update handling logic here
-    return JSONResponse({"ok": True})# Required by Vercel
 application = app
