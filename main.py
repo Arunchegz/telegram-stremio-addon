@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from pyrogram import Client, utils, raw
-from pyrogram.errors import FloodWait, AuthBytesInvalid
+from pyrogram.errors import FloodWait, AuthBytesInvalid, FileReferenceExpired
 from pyrogram.session import Session, Auth
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
@@ -121,20 +121,12 @@ class ByteStreamer:
     """
     def __init__(self, client: Client):
         self.client: Client = client
-        self._file_id_cache: Dict[int, FileId] = {}
-        self._cache_lock: asyncio.Lock = asyncio.Lock()
 
     async def get_file_id(self, msg) -> FileId:
-        msg_id = msg.id
-        async with self._cache_lock:
-            if msg_id in self._file_id_cache:
-                return self._file_id_cache[msg_id]
-            file_id = self._extract_file_id(msg)
-            self._file_id_cache[msg_id] = file_id
-            if len(self._file_id_cache) > 200:
-                oldest = next(iter(self._file_id_cache))
-                del self._file_id_cache[oldest]
-            return file_id
+        # Never cache: Telegram file_reference values expire, causing
+        # FILE_REFERENCE_EXPIRED errors. Always extract from the freshly
+        # fetched message object passed in from the proxy route.
+        return self._extract_file_id(msg)
 
     async def yield_file(
         self,
@@ -145,6 +137,21 @@ class ByteStreamer:
         part_count: int,
         chunk_size: int = TG_CHUNK_SIZE,
     ) -> AsyncGenerator[bytes, None]:
+        async for chunk in self._yield_file_inner(
+            msg, offset, first_part_cut, last_part_cut, part_count, chunk_size
+        ):
+            yield chunk
+
+    async def _yield_file_inner(
+        self,
+        msg,
+        offset: int,
+        first_part_cut: int,
+        last_part_cut: int,
+        part_count: int,
+        chunk_size: int,
+        _retry: bool = True,
+    ) -> AsyncGenerator[bytes, None]:
         file_id = await self.get_file_id(msg)
         media_session = await self._get_media_session(file_id)
         location = self._get_location(file_id)
@@ -152,13 +159,24 @@ class ByteStreamer:
         current_part = 1
         current_offset = offset
 
-        r = await media_session.invoke(
-            raw.functions.upload.GetFile(
-                location=location,
-                offset=current_offset,
-                limit=chunk_size,
+        try:
+            r = await media_session.invoke(
+                raw.functions.upload.GetFile(
+                    location=location,
+                    offset=current_offset,
+                    limit=chunk_size,
+                )
             )
-        )
+        except FileReferenceExpired:
+            if not _retry:
+                raise
+            print(f"[yield_file] FILE_REFERENCE_EXPIRED on first chunk — re-fetching message and retrying")
+            msg = await fetch_message(msg.id)
+            async for chunk in self._yield_file_inner(
+                msg, offset, first_part_cut, last_part_cut, part_count, chunk_size, _retry=False
+            ):
+                yield chunk
+            return
 
         if not isinstance(r, raw.types.upload.File):
             return
@@ -183,13 +201,30 @@ class ByteStreamer:
             if current_part > part_count:
                 break
 
-            r = await media_session.invoke(
-                raw.functions.upload.GetFile(
-                    location=location,
-                    offset=current_offset,
-                    limit=chunk_size,
+            try:
+                r = await media_session.invoke(
+                    raw.functions.upload.GetFile(
+                        location=location,
+                        offset=current_offset,
+                        limit=chunk_size,
+                    )
                 )
-            )
+            except FileReferenceExpired:
+                if not _retry:
+                    raise
+                print(f"[yield_file] FILE_REFERENCE_EXPIRED mid-stream at part {current_part} — re-fetching message and retrying from offset {current_offset}")
+                msg = await fetch_message(msg.id)
+                async for remaining_chunk in self._yield_file_inner(
+                    msg,
+                    current_offset,
+                    0,                # cut already applied on earlier parts
+                    last_part_cut,
+                    part_count - current_part + 1,
+                    chunk_size,
+                    _retry=False,
+                ):
+                    yield remaining_chunk
+                return
 
     @staticmethod
     def _extract_file_id(msg) -> FileId:
